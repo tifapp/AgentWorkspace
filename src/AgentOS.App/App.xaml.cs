@@ -19,7 +19,10 @@ public partial class App : Application
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
         _window = new MainWindow();
-        _capture = new CaptureController(_window);
+        if (!Environment.GetCommandLineArgs().Contains("--ui-preview"))
+        {
+            _capture = new CaptureController(_window);
+        }
         _window.Activate();
     }
 }
