@@ -1,5 +1,5 @@
 using AgentOS.Core;
-using Microsoft.UI.Dispatching;
+using DispatcherQueue = Microsoft.UI.Dispatching.DispatcherQueue;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
