@@ -3,6 +3,7 @@
 - [Decisions](decisions.md): approved Windows/Codex scope, historical retirement and current delivery boundaries.
 - [Integration progress](integration-progress.md): source identity, native evidence and outstanding acceptance.
 - [Open verification](open.md): prerequisites and evidence still needed.
+- [Conflict continuity verification](conflict-continuity.md): native pinned SDK results, receipts and acceptance limits.
 - [Windows isolation](windows-isolation.md): managed command boundary and historical platform findings.
 - [UI design](ui-design.md): design reference; current controls and verification are in [desktop interactions](../docs/desktop-interactions.md).
 
