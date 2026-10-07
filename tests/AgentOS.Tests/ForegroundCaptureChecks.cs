@@ -87,7 +87,8 @@ $form.Add_Shown({ $form.Activate(); [IO.File]::WriteAllText($env:AGENTOS_FIXTURE
    var parts=(await File.ReadAllTextAsync(ready)).Split(',');
    Check(parts.Length==2&&int.Parse(parts[0])==child.Id,"Fixture PID handshake mismatch.");
    hwnd=(nint)long.Parse(parts[1]);
-   Check(hwnd!=0&&GetWindowThreadProcessId(hwnd,out var pid)!=0&&pid==child.Id,"Fixture HWND/PID mismatch.");
+   uint pid=0;
+   Check(hwnd!=0&&GetWindowThreadProcessId(hwnd,out pid)!=0&&pid==child.Id,"Fixture HWND/PID mismatch.");
    timer.Restart();
    while(GetForegroundWindow()!=hwnd&&timer.Elapsed<TimeSpan.FromSeconds(5))await Task.Delay(50);
    Check(GetForegroundWindow()==hwnd,"Owned fixture is not foreground.");
