@@ -11,10 +11,10 @@ internal sealed class TaskRow
 {
  readonly string id; readonly Func<string,string,Task> followUp; readonly Func<MenuFlyout> menu; readonly bool preview;
  readonly TextBlock title=MainWindow.Label("",13,true),status=MainWindow.Label("",12),snippet=MainWindow.Label("",12),pending=MainWindow.Label("Release decision pending",12);
- readonly TextBox reply=new(){Header="Follow-up task",PlaceholderText="Describe the next change",AcceptsReturn=true,TextWrapping=TextWrapping.Wrap,MinHeight=58};
- readonly TextBox report=new(){IsReadOnly=true,AcceptsReturn=true,TextWrapping=TextWrapping.Wrap,MaxHeight=250};
- readonly FontIcon stateIcon=new(){FontFamily=new FontFamily("Segoe Fluent Icons"),Width=14,Height=14};
- readonly Expander reportExpander=new(); readonly StackPanel replyArea=new(){Spacing=5};
+ readonly TextBox reply=new(){Header="Follow-up task",PlaceholderText="Describe the next change",AcceptsReturn=true,TextWrapping=TextWrapping.Wrap,MinHeight=58,HorizontalAlignment=HorizontalAlignment.Stretch};
+ readonly TextBlock report=new(){IsTextSelectionEnabled=true,TextWrapping=TextWrapping.Wrap,HorizontalAlignment=HorizontalAlignment.Stretch,TextAlignment=TextAlignment.Left};
+ readonly FontIcon stateIcon=new(){FontFamily=new FontFamily("Segoe MDL2 Assets"),Width=14,Height=14};
+ readonly Expander reportExpander=new(){HorizontalAlignment=HorizontalAlignment.Stretch,HorizontalContentAlignment=HorizontalAlignment.Stretch}; readonly StackPanel replyArea=new(){Spacing=5,HorizontalAlignment=HorizontalAlignment.Stretch};
  readonly Button details=new(){Content="Details"},replyStub=new(){Content="Reply"},stopButton=new(){Content="Stop"},reviewButton=new(){Content="Review decision"},send=new(){Content="Send follow-up"};
  bool sending; WorkStatus lastStatus;
  public StackPanel Root{get;}=new(); public StackPanel Children{get;}=new(){Spacing=5,Margin=new Thickness(16,2,0,3)};
@@ -28,7 +28,7 @@ internal sealed class TaskRow
   AutomationProperties.SetAutomationId(stopButton,"CancelTask");stopButton.Click+=async(_,_)=>await stop(id);actions.Children.Add(stopButton);
   var more=new Button{Content="⋯"};AutomationProperties.SetAutomationId(more,"TaskActions");AutomationProperties.SetName(more,"More task actions");more.Click+=(_,_)=>menu().ShowAt(more);actions.Children.Add(more);Grid.SetColumn(actions,1);top.Children.Add(actions);card.Children.Add(top);
   var state=new StackPanel{Orientation=Orientation.Horizontal,Spacing=5};state.Children.Add(stateIcon);state.Children.Add(status);card.Children.Add(state);
-  var resultBody=new StackPanel{Spacing=5};resultBody.Children.Add(report);resultBody.Children.Add(replyArea);reportExpander.Header=snippet;reportExpander.Content=resultBody;AutomationProperties.SetAutomationId(reportExpander,"CodexReport");
+  var resultBody=new StackPanel{Spacing=5,Padding=new Thickness(4),HorizontalAlignment=HorizontalAlignment.Stretch};resultBody.Children.Add(new ScrollViewer{Content=report,MaxHeight=250,HorizontalAlignment=HorizontalAlignment.Stretch,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled,VerticalScrollBarVisibility=ScrollBarVisibility.Auto});resultBody.Children.Add(replyArea);reportExpander.Header=snippet;reportExpander.Content=resultBody;AutomationProperties.SetAutomationId(reportExpander,"CodexReport");
   card.Children.Add(new Border{BorderThickness=new Thickness(1,0,0,0),Margin=new Thickness(10,0,0,0),Padding=new Thickness(7,0,0,0),BorderBrush=Application.Current.Resources["TextFillColorSecondaryBrush"] as Brush,Child=reportExpander});
   card.Children.Add(pending);AutomationProperties.SetAutomationId(reviewButton,"TaskDecision");reviewButton.Click+=async(_,_)=>await reviewDecision(id);card.Children.Add(reviewButton);
   AutomationProperties.SetAutomationId(replyStub,"OpenFollowUp");replyStub.Click+=(_,_)=>OpenReply();card.Children.Add(new Border{BorderThickness=new Thickness(1,0,0,0),Margin=new Thickness(10,0,0,0),Padding=new Thickness(7,0,0,0),BorderBrush=Application.Current.Resources["TextFillColorSecondaryBrush"] as Brush,Child=replyStub});
