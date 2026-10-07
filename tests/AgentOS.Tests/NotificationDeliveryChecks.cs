@@ -33,6 +33,39 @@ internal static class NotificationDeliveryChecks
   conflict.Response="handled";File.WriteAllText(Path.Combine(b,"state.json"),JsonSerializer.Serialize(new ProjectState{ProjectPath=Path.GetFullPath(projectB),Work=[new WorkUnit{Id="same-work",Status=WorkStatus.Parked}],Decisions=[decision],Conflicts=[conflict]},JsonFormat.Options));
   Check(!watcher.IsCurrent(seen[4]),"answered conflict remained clickable");
   File.WriteAllText(Path.Combine(b,"interactions.json"),"{\"Schema\":2,\"Items\":[]}");watcher.Scan();Check(!watcher.IsCurrent(seen[1]),"unsupported journal accepted");
+  // Real state files carry prompt and diff history; notification text must remain fixed metadata.
+  var largeProject=Path.Combine(root,"large-project");Directory.CreateDirectory(largeProject);
+  var largeDir=Path.Combine(root,"large-state");Directory.CreateDirectory(largeDir);
+  var largeSecret="private prompt and diff content";
+  var largeDecision=new HumanDecision{Id="large-decision",WorkId="large-work",Status=DecisionStatus.Pending};
+  var largeConflict=new ConflictNotice{Id="large-conflict",WorkId="large-work",Cause=largeSecret};
+  var largeState=new ProjectState{Schema=3,ProjectPath=Path.GetFullPath(largeProject),
+   Work=[new WorkUnit{Id="large-work",Status=WorkStatus.NeedsResponse,Task=largeSecret,Diff=new string('x',8_600_000)+largeSecret}],
+   Decisions=[largeDecision],Conflicts=[largeConflict]};
+  var largePath=Path.Combine(largeDir,"state.json");
+  File.WriteAllText(largePath,JsonSerializer.Serialize(largeState,JsonFormat.Options));
+  Check(new FileInfo(largePath).Length>8_000_000,"large state fixture did not exceed previous limit");
+  var largeSeen=new List<LocalNotice>();
+  using(var largeWatcher=new ProjectNotificationWatcher(center,largeSeen.Add))
+  {
+   largeWatcher.Select(largeProject,Path.Combine(root,"wrong-data-root"),largeDir);
+   Check(largeSeen.Count==2&&largeSeen.Any(x=>x.Identity=="decision:"+largeDecision.Id)&&largeSeen.Any(x=>x.Identity=="conflict:"+largeConflict.Id),"schema 3 large state pending requests not delivered");
+   Check(largeSeen.All(x=>!x.Title.Contains(largeSecret,StringComparison.Ordinal)&&x.Title.Length<=100&&largeWatcher.IsCurrent(x)),"private state content leaked or schema 3 notice refused");
+   largeWatcher.Scan();
+   Check(largeSeen.Count==2&&center.History.Count(x=>x.Project==Path.GetFullPath(largeProject))==2,"large state notifications duplicated");
+   largeState.Schema=4;
+   largeState.Decisions=[new HumanDecision{Id="future-decision",WorkId="large-work",Status=DecisionStatus.Pending}];
+   largeState.Conflicts=[new ConflictNotice{Id="future-conflict",WorkId="large-work"}];
+   File.WriteAllText(largePath,JsonSerializer.Serialize(largeState,JsonFormat.Options));
+   largeWatcher.Scan();
+   Check(largeSeen.Count==2&&largeSeen.All(x=>!largeWatcher.IsCurrent(x)),"unknown future state version was accepted");
+   File.WriteAllText(largePath,"{malformed");
+   largeWatcher.Scan();
+   Check(largeSeen.Count==2&&largeSeen.All(x=>!largeWatcher.IsCurrent(x)),"malformed state was accepted");
+   using(var oversized=File.Open(largePath,FileMode.Create,FileAccess.Write,FileShare.None))oversized.SetLength(64_000_001);
+   largeWatcher.Scan();
+   Check(largeSeen.Count==2&&largeSeen.All(x=>!largeWatcher.IsCurrent(x)),"state above bounded capacity was accepted");
+  }
   Parallel.For(0,48,i=>{var other=new NotificationCenter(Path.Combine(root,"history.json"));other.Record("parallel:"+i,projectB,"same-work",null,"Test","Concurrent history");other.Record("shared",projectB,"same-work",null,"Test","Deduplicated history");});
   Check(center.History.Count(x=>x.Identity.StartsWith("parallel:",StringComparison.Ordinal))==48&&center.History.Count(x=>x.Identity=="shared")==1,"concurrent history lost or duplicated");
   center.ConfigureEnabled(false);Check(!new NotificationCenter(Path.Combine(root,"history.json")).Enabled,"preference not durable");
