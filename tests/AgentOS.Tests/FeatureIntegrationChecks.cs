@@ -48,9 +48,9 @@ internal static class FeatureIntegrationChecks
         var node = new MapTask { Title = "Logical task", Prompt = "Write-Output work", Acceptance = "Done", Selected = true };
         var mapId = runtime.SaveDraftMap(new AgentOS.Core.TaskMap { Title = "Attempts", Tasks = [node] });
         var state = (ProjectState)typeof(ProjectRuntime).GetField("_state", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(runtime)!;
-        var first = new WorkUnit { ExternalRequestId = node.Id, Status = WorkStatus.Stale };
-        var revision = new WorkUnit { ParentId = first.Id, Status = WorkStatus.Completed };
-        var followup = new WorkUnit { ParentId = revision.Id, Status = WorkStatus.Completed, Task = "Separate followup" };
+        var first = new WorkUnit { ExternalRequestId = node.Id, Relationship = WorkRelationship.Original, Status = WorkStatus.Stale };
+        var revision = new WorkUnit { ParentId = first.Id, Relationship = WorkRelationship.Revision, Status = WorkStatus.Completed };
+        var followup = new WorkUnit { ParentId = revision.Id, Relationship = WorkRelationship.Followup, Status = WorkStatus.Completed, Task = "Separate followup" };
         state.Work.AddRange([first, revision, followup]);
         typeof(ProjectRuntime).GetMethod("UpdateMapStatuses", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(runtime, null);
         var map = state.Maps.Single(x => x.Id == mapId);

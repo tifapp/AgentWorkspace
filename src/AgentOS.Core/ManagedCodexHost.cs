@@ -132,7 +132,7 @@ internal sealed class ManagedCodexHost : IWorkHost
                 }
                 else if (name == "agent_os_ack_message")
                 {
-                    var id=p.GetProperty("arguments").GetProperty("messageId").GetString()!;var item=Runtime!.AcknowledgeMessage(work.Id,activeTurn!,id);result="Acknowledged delivered steering message "+item.Id;success=true;
+                    var messageId=p.GetProperty("arguments").GetProperty("messageId").GetString()!;var item=Runtime!.AcknowledgeMessage(work.Id,activeTurn!,messageId);result="Acknowledged delivered steering message "+item.Id;success=true;
                 }
                 else if (name == "agent_os_ack_peer")
                 {
@@ -302,7 +302,7 @@ internal sealed class ManagedCodexHost : IWorkHost
                 if (!ok) return new(1, false, thread, report, model);
                 var notice = Runtime == null ? null : await Runtime.AfterManagedTurnAsync(work.Id, cancel);
                 if (notice == null) return new(0, true, thread, report, model);
-                if (wasOwed && Runtime.RegisterConflictNonresponse(work.Id) >= 2)
+                if (wasOwed && Runtime is not null && Runtime.RegisterConflictNonresponse(work.Id) >= 2)
                 {
                     output("Conflict response remains owed after repeated turns. Work is durably NeedsResponse.");
                     return new(0, true, thread, report, model);

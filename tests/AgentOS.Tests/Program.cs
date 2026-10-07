@@ -256,9 +256,13 @@ await Test("Old state keeps history and captured citations cannot be rewritten",
     var store = new StateStore(Path.Combine(root, "map-migration-" + Guid.NewGuid().ToString("N")));
     File.WriteAllText(store.StatePath, legacy);
     var migrated = store.Read()!;
-    Assert(migrated.Schema == 2 && migrated.Maps.Count == 0 && migrated.Work.Single().Task == "legacy task", "Schema-1 history was lost.");
+        var historicalWork = migrated.Work.Single();
+    var historicalMap = migrated.Maps.Single();
+    var historicalTask = historicalMap.Tasks.Single();
+    Assert(migrated.Schema == 3 && migrated.HistoricalWorkIds.SequenceEqual([historicalWork.Id]) && historicalWork.Task == "legacy task", "Schema-1 history was lost.");
+    Assert(historicalMap.Status == MapStatus.Draft && historicalTask.WorkId == historicalWork.Id && historicalTask.WorkIds.SequenceEqual([historicalWork.Id]) && migrated.Work.Count == 1, "Historical map changed the root or launched work.");
     Assert(File.ReadAllText(store.StatePath + ".schema1.bak") == legacy, "Migration backup differs from old history.");
-    store.Save(migrated); Assert(store.Read()!.Work.Single().Task == "legacy task", "Saved migration lost history.");
+    store.Save(migrated); var reopenedHistory = store.Read()!; Assert(reopenedHistory.Work.Single().Task == "legacy task" && reopenedHistory.HistoricalWorkIds.SequenceEqual([historicalWork.Id]) && reopenedHistory.Maps.Single().Id == historicalMap.Id && reopenedHistory.Maps.Single().Tasks.Single().Id == historicalTask.Id && reopenedHistory.Maps.Single().Tasks.Single().WorkIds.SequenceEqual([historicalWork.Id]), "Saved migration lost stable history identities.");
     await using var r = await NewRuntime();
     var citation = ContextCitation.Create("foreground-title", System.Text.Encoding.UTF8.GetBytes("example"));
     var map = new AgentOS.Core.TaskMap { Title = "Captured context", Tasks = [new MapTask { Title = "Inspect", Prompt = "Write-Output inspect", Acceptance = "Inspection recorded" }], Citations = [citation] };

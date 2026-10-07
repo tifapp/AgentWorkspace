@@ -1,4 +1,5 @@
 using AgentOS.Core;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -8,11 +9,40 @@ public static class ExecutionProfileChecks
  static void Check(bool value,string message){if(!value)throw new Exception(message);}
  static void Reject(Action action,string message){try{action();}catch(ArgumentException){return;}throw new Exception(message);}
  static string H(string value)=>Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
+ static void CheckHelperScripts(string root)
+ {
+  var helpers=Path.Combine(root,"helpers");Directory.CreateDirectory(helpers);
+  File.WriteAllText(Path.Combine(helpers,"HostHelper.ps1"),HyperVSdkRunner.HostHelper);
+  File.WriteAllText(Path.Combine(helpers,"RecoveryHelper.ps1"),HyperVSdkRunner.RecoveryHelper);
+  File.WriteAllText(Path.Combine(helpers,"Helper.ps1"),HyperVSdkRunner.Helper);
+  var check=Path.Combine(root,"check-helper-ast.ps1");
+  File.WriteAllText(check,"""
+param([string]$Directory)
+$files=@(Get-ChildItem -LiteralPath $Directory -Filter '*.ps1')
+if($files.Count -ne 3){throw 'Expected three embedded Hyper-V scripts'}
+foreach($file in $files){
+ $tokens=$null;$errors=$null
+ $ast=[System.Management.Automation.Language.Parser]::ParseFile($file.FullName,[ref]$tokens,[ref]$errors)
+ if($errors.Count -ne 0){throw ($file.Name+': '+($errors | ForEach-Object Message | Out-String))}
+ if($file.Name -eq 'Helper.ps1'){
+  $assignments=@($ast.FindAll({param($node) $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and $node.Left.VariablePath.UserPath -eq 'worker'},$true))
+  if($assignments.Count -ne 1 -or !$assignments[0].Extent.Text.StartsWith('$worker=')){throw 'Guest worker credential assignment is missing from helper AST'}
+ }
+}
+""");
+  var shell=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),"WindowsPowerShell","v1.0","powershell.exe");
+  var start=new ProcessStartInfo(shell){UseShellExecute=false,CreateNoWindow=true,RedirectStandardError=true};
+  start.ArgumentList.Add("-NoProfile");start.ArgumentList.Add("-NonInteractive");start.ArgumentList.Add("-File");start.ArgumentList.Add(check);start.ArgumentList.Add(helpers);
+  using var process=Process.Start(start)??throw new Exception("PowerShell parser did not start.");
+  if(!process.WaitForExit(15000)){process.Kill(true);throw new Exception("PowerShell helper parse timed out.");}
+  Check(process.ExitCode==0,"Embedded Hyper-V script AST check failed: "+process.StandardError.ReadToEnd());
+ }
  public static Task RunAsync()
  {
   var root=Path.Combine(Path.GetTempPath(),"agentos-profile-checks-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(root);
   try
   {
+   CheckHelperScripts(root);
    var registry=new ExecutionProfileRegistry(root);
    Check(registry.Current.SdkBackend==ExecutionBackend.AppContainer&&registry.Describe().Available&&!registry.Describe().DeploymentAvailable,"AppContainer must be default; deployment requires configuration.");
    var basePath=Path.Combine(root,"base.vhdx");

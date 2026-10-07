@@ -59,7 +59,7 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
             if(reference.ExitCode!=0)
             {
                 if(saved!=null)throw new IOException("Saved shared Git ref missing; opening would reset history.");
-                var initializer=new MachineCoordinator(coordinatorRoot);using var registration=initializer.RegisterRuntime();using var admission=await initializer.EnterAsync(new[]{profile.PublicationClaim},"initialize shared ref",null,CancellationToken.None);
+                var initializer=new MachineCoordinator(coordinatorRoot);using var initializationRegistration=initializer.RegisterRuntime();using var admission=await initializer.EnterAsync(new[]{profile.PublicationClaim},"initialize shared ref",null,CancellationToken.None);
                 await profile.Revalidate();await PrivateGit.VerifySnapshot(project,head,profile);
                 if((await Commands.Git(project,"rev-parse","HEAD")).Checked()!=head||(await Commands.Git(project,"rev-parse","--verify",IntegratedRef)).ExitCode==0)throw new IOException("Source changed before shared ref initialization.");
                 (await Commands.Git(project,"update-ref",IntegratedRef,head,new string('0',head.Length))).Checked();

@@ -399,19 +399,20 @@ $spec=@{Nonce=$m.Nonce;Script=$m.Script;Artifacts=@($m.Artifacts);TimeoutSeconds
 $r=Invoke-Command -VMId $vm.Id -Credential $guest -ScriptBlock {
  param($json)
  $s=$json | ConvertFrom-Json
- $root='C:\AgentOS\workspace';New-Item -ItemType Directory -Force -Path $root | Out-Null $worker=New-Object System.Management.Automation.PSCredential($s.WorkerUser,(ConvertTo-SecureString $s.WorkerSecret -AsPlainText -Force))
+ $root='C:\AgentOS\workspace';New-Item -ItemType Directory -Force -Path $root | Out-Null
+  $worker=New-Object System.Management.Automation.PSCredential($s.WorkerUser,(ConvertTo-SecureString $s.WorkerSecret -AsPlainText -Force))
  $base='C:\AgentOS';$receiptPath=Join-Path $base 'sdk-receipt.json';[IO.File]::WriteAllText($receiptPath,'')
  icacls $base /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null;if($LASTEXITCODE -ne 0){throw 'SDK ACL setup failed'}
- icacls $base /grant:r "$($s.WorkerUser):RX" | Out-Null;if($LASTEXITCODE -ne 0){throw 'SDK ACL setup failed'}
+ icacls $base /grant:r ""$($s.WorkerUser):RX"" | Out-Null;if($LASTEXITCODE -ne 0){throw 'SDK ACL setup failed'}
  icacls $receiptPath /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' | Out-Null;if($LASTEXITCODE -ne 0){throw 'SDK ACL setup failed'}
- icacls $root /grant:r "$($s.WorkerUser):(OI)(CI)M" | Out-Null;if($LASTEXITCODE -ne 0){throw 'SDK worker ACL failed'}
+ icacls $root /grant:r ""$($s.WorkerUser):(OI)(CI)M"" | Out-Null;if($LASTEXITCODE -ne 0){throw 'SDK worker ACL failed'}
  $check=Start-Job -Credential $worker -ScriptBlock {$identity=[Security.Principal.WindowsIdentity]::GetCurrent();$principal=New-Object Security.Principal.WindowsPrincipal($identity);$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) -or @($identity.Groups | Where-Object {$_.Value -eq 'S-1-5-32-544'}).Count -gt 0}
  if(!(Wait-Job $check -Timeout 15)){Stop-Job $check;throw 'SDK worker identity check timed out'}
  $workerIsAdmin=Receive-Job $check;Remove-Job $check -Force;if($workerIsAdmin -ne $false){throw 'SDK worker must be nonadministrator'}
  function TextHash($text){$sha=[Security.Cryptography.SHA256]::Create();try{return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)))).Replace('-','')}finally{$sha.Dispose()}}
  function SourceHash($path,$names){
   $lines=@();foreach($name in $names){if($name -match '(^|/)(\.|\.\.)($|/)' -or $name -match '(^|/)\.git($|/)'){throw 'SDK input path invalid'};$file=Join-Path $path ($name.Replace('/','\'));if(!(Test-Path -LiteralPath $file -PathType Leaf)){throw 'SDK input missing'};$cursor=$file;while($cursor.StartsWith($path,[StringComparison]::OrdinalIgnoreCase)){if((Get-Item -LiteralPath $cursor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'SDK input link'};if($cursor -eq $path){break};$cursor=Split-Path $cursor};$lines+=($name+':'+(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash)}
-  [Array]::Sort($lines,[StringComparer]::Ordinal);return TextHash ($lines -join "`n")
+  [Array]::Sort($lines,[StringComparer]::Ordinal);return TextHash ($lines -join ""`n"")
  }
  $input=SourceHash $root @($s.InputPaths);if($input -ne $s.InputSha256){throw 'SDK input fingerprint mismatch'}
  $output='';$errorText='';$code=1
