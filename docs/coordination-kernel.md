@@ -19,7 +19,40 @@ type Message = {id:string;from:Address;to:Address;text:string;replyTo?:string;cr
 type Action = {id:string;owner?:Address;text:string;state:'open'|'closed';createdAt:string};
 ```
 
-read/write and open/closed are literal values. IDs are UUIDs; times UTC RFC3339. Each restart creates a new incarnation. Generation increments exactly once per committed transaction changing public projection; private-only commits do not. Holds are currently admitted ownership only, never waiting/future claims. Owner is assignee. Messages/replies are immutable separate objects. Assignment/reassignment requires explicit authority. Closure atomically stores succeeded/failed/canceled/dropped, explanation/artifacts outside projection. Addresses are user, system, participant IDs, group:<id>, agents/*. Stable IDs/groups live in identity. Group/broadcast recipients are send-time immutable snapshots. Typed records keyed by object ID carry attachments, structured replies, dependencies, provenance, control; text alone is never control. Postcommit temp replacement exports read-only JSON; stale/missing export is nonauthoritative.
+A minimal populated version 1 projection (the export is read-only and nonauthoritative):
+
+```kernel-projection-example
+{
+  "version": 1,
+  "generation": 1,
+  "entries": [
+    {
+      "id": "11111111-1111-4111-8111-111111111111",
+      "holds": {"file:C:/work/note.txt": "write"},
+      "seenAt": "2026-10-07T12:00:00Z"
+    }
+  ],
+  "messages": [
+    {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "from": "11111111-1111-4111-8111-111111111111",
+      "to": "group:33333333-3333-4333-8333-333333333333",
+      "text": "Ready?",
+      "createdAt": "2026-10-07T12:00:01Z"
+    }
+  ],
+  "actions": [
+    {
+      "id": "44444444-4444-4444-8444-444444444444",
+      "owner": "11111111-1111-4111-8111-111111111111",
+      "text": "Review note",
+      "state": "open",
+      "createdAt": "2026-10-07T12:00:02Z"
+    }
+  ]
+}
+```
+read/write and open/closed are literal values. IDs are UUIDs; times UTC RFC3339. Each restart creates a new incarnation. Generation increments exactly once per committed transaction changing public projection; private-only commits do not. Holds are currently admitted ownership only, never waiting/future claims. Owner is assignee. Messages/replies are immutable separate objects. Assignment/reassignment requires explicit authority. Closure atomically stores succeeded/failed/canceled/dropped, explanation/artifacts outside projection. Addresses are user, system, bare UUID participant IDs, group:<id>, agents and * as separate addresses. Stable IDs/groups live in identity. Group/broadcast recipients are send-time immutable snapshots. Typed records keyed by object ID carry attachments, structured replies, dependencies, provenance, control; text alone is never control. Postcommit temp replacement exports read-only JSON; stale/missing export is nonauthoritative.
 
 
 ## Trusted store, schema, and atomic operations
@@ -135,7 +168,7 @@ Rollback first stops new admission/authority, resolves live writers and unknown 
 
 ## 85-case reference catalogue mapping
 
-These design case IDs from [reference coverage](reference-coverage.md) are not executed replacement tests. Each row maps the supplied scenario to owner, service API and target assertion. N means no new-kernel executed evidence. Stages 3–5 require a source-exact receipt per applicable row; excluded cases need a Windows analogue or explicit out-of-scope result, never a pass.
+These design case IDs from [reference coverage](reference-coverage.md) are not executed replacement tests. Each row maps the supplied scenario to owner, service API and target assertion. N means no new-kernel executed evidence. Stages 3-5 require a source-exact receipt per applicable row; excluded cases need a Windows analogue or explicit out-of-scope result, never a pass.
 
 | ID | Supplied scenario | Owner/API and target assertion | New evidence |
 | --- | --- | --- | --- |
@@ -229,4 +262,12 @@ Catalogue rows: 85. Completion requires case-by-case evidence ledger with comman
 
 ## Documentation completion gate
 
-Before implementation, freeze concrete SQLite path, DDL/migrations, service API request/response schemas and CLI command grammar against this contract. Validate six public type declarations byte-for-byte (literal template backticks and quoted unions), all 85 unique catalogue IDs against reference coverage, every baseline field mapping, relative links, and stage/verification receipts. A documentation check fails on missing/duplicate IDs, broken links, unowned API mutations, or evidence called executed without command, source revision, result and artifact digest. These checks establish plan consistency only, not runtime acceptance.
+Run `powershell -NoProfile -File scripts/ValidateKernelDocs.ps1` for document consistency while requirements are planned. Future feature acceptance and cutover require `powershell -NoProfile -File scripts/ValidateKernelDocs.ps1 -RequireComplete`, which fails until every in-scope requirement has a passing source-exact receipt and every exclusion has a rationale. The [versioned acceptance catalogue](kernel-acceptance.json) distinguishes these states. Service operations in this plan are planned API descriptions, not executable CLI commands. Current executable CLI verbs are defined in [the current CLI source](../src/AgentOS.Cli/Program.cs).
+
+A current legacy CLI example is:
+
+```text
+agent-os status <project>
+```
+
+Before broader implementation, freeze the concrete SQLite path, DDL and migrations, service request/response schemas, and CLI grammar against this contract. The current gate checks document structure, historical case meanings, the fixed semantic checklist, baseline field names, local links and anchors, exact public type declarations, the populated JSON example, current CLI verb names, and any claimed executed receipt fields and artifact hashes. It checks executable examples against verbs, not argument syntax. Later service and behavioral tests must establish runtime acceptance.

@@ -1,4 +1,4 @@
-﻿# Coordination kernel decision — 2026-10-07
+# Coordination kernel decision — 2026-10-07
 
 Source: user-approved end state and acceptance plan supplied 2026-10-07; baseline revision main eae2297. This is a prospective decision, not implementation or executed acceptance. The isolated documentation clone is to be integrated by the requester into original main after validation.
 
@@ -8,3 +8,17 @@ The exact public projection, logical schema, invariants, module/API ownership, 8
 
 Do not claim the new service, tests, live VM/SMB/external behavior, installed cutover, or v14/v15 wire compatibility from this decision. The final authority transition requires all recorded gates, drained or relinquished legacy tasks, no remaining writers, archived old files, and no simultaneous authorities; the user has already authorized that end state subject to gates.
 
+
+## Documentation and evidence gate
+
+The versioned [acceptance catalogue](../docs/kernel-acceptance.json) maps the 85 original case meanings plus 71 named architecture, transaction, API, Windows analogue, retention, backup, migration and verification requirements. Its current statuses are 148 planned, 0 implemented, 0 verified and 8 excluded platform/host cases. Excluded Mac, phone and other-host scenarios have explicit rationales; their Windows security and delivery analogues remain planned. No historical old-runtime receipt verifies the replacement service.
+
+The [documentation validator](../scripts/ValidateKernelDocs.ps1) checks the fixed case and semantic manifests, exact historical scenario names, projection example types and keys, six public TypeScript declarations, local links, executable CLI examples and source-linked receipt fields and hashes. Ordinary validation proves only consistency with explicit pending work. Acceptance and any cutover require its strict -RequireComplete mode, which fails for planned or merely implemented requirements and requires passing source-exact receipts for every in-scope row. A receipt must name an executed command, source revision, result, repo-local artifact and matching SHA-256. Historical baseline tests and scripted fixture evidence remain distinguishable from replacement-binary and live external/VM/SMB evidence; none was promoted here.
+
+## Source-exact progress received from native requester
+
+At baseline eae2297, the native top-level suite completed 94/94, with reported symlink, SMB and foreground subfixture skips. The baseline source manifest is artifacts/kernel-baseline-eae2297/source-manifest.json; results.json alongside it has SHA-256 926879C3FF29BEB5B1F6C99801D8AFE2418DA9BB4A858E9E7958EFCEE262F779. These paths are in the requester's original repository, not this private documentation clone.
+
+First kernel source 364d3ad built and ran 8/9 kernel tests. The failing identity fixture read raw SQLite while it remained open and hit a sharing error. Original-repository artifacts/kernel-tests-364d3ad/results.json has SHA-256 82873C950F1C390C20F24C15165A475A8652B4892F6C0A2CC91066C99E40BFA2. Correction 6e11fba disposes and checkpoints before scanning; its native build succeeded and 9/9 Kernel tests passed. Original-repository artifacts/kernel-tests-6e11fba/results.json has SHA-256 8C70E14B5CAA9A7C88E0D414E601267181BBF7669AD54A3721904230A99A9BA5. Each kernel test artifact directory has source-manifest.json beside results.json. The reported commands were the pinned SDK build of tests/AgentOS.Tests in Release and the compiled AgentOS.Tests.exe with artifact root for baseline or artifact root plus Kernel for the new slice. These were native runs outside AppContainer. They establish only the first tested slice; transport, scheduler, adapters, full acceptance and cutover remain pending. Main was reported at 6e11fba after a guarded fast-forward. A separate module-composition refactor remains in progress and needs rerun.
+
+The local documentation gate checks executable examples against CLI verb names in Program.cs; it does not verify argument arity or values. The displayed status command uses the current CLI's status verb. The catalogue stays planned until exact replacement claims and receipts are attached per row.
