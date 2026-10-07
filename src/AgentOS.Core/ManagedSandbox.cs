@@ -25,6 +25,7 @@ internal sealed class ManagedSandbox : IDisposable
     {
         _authPath = authPath;
         Workspace = SafePaths.Project(workspace);
+        PrivateGit.CheckPrivateTree(Workspace);
         var hr = CreateAppContainerProfile(_name, _name, "agent-os task command isolation", IntPtr.Zero, 0, out _sid);
         if (hr != 0) Marshal.ThrowExceptionForHR(hr);
         try
@@ -67,6 +68,7 @@ internal sealed class ManagedSandbox : IDisposable
     public async Task<CommandResult> RunAsync(string script, string logPath, Action<string>? output, CancellationToken cancel)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        PrivateGit.CheckPrivateTree(Workspace);
         Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
         var temp = Path.Combine(Workspace, Directory.Exists(Path.Combine(Workspace, ".git")) ? ".git" : ".agent-os", "agent-os-temp"); Directory.CreateDirectory(temp);
         var gate = "$ProgressPreference='SilentlyContinue'; $ErrorActionPreference='Stop'; New-PSDrive -Name Work -PSProvider FileSystem -Root " + Commands.Quote(Workspace) + " | Out-Null; Set-Location Work:\\; [Environment]::CurrentDirectory=" + Commands.Quote(Workspace) + "; " +

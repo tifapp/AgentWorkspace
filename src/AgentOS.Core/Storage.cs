@@ -12,14 +12,22 @@ internal sealed class StateStore
     public ProjectState? Read()
     {
         if (!File.Exists(StatePath)) return null;
-        var state = JsonSerializer.Deserialize<ProjectState>(File.ReadAllText(StatePath), JsonFormat.Options)
+        var original = File.ReadAllBytes(StatePath);
+        var state = JsonSerializer.Deserialize<ProjectState>(original, JsonFormat.Options)
                     ?? throw new InvalidDataException("The saved project state is empty. Restore a known backup; it was not reset.");
-        if (state.Schema is not (1 or 2)) throw new InvalidDataException($"Unsupported project state version {state.Schema}. No state was changed.");
-        if (state.Schema == 1)
+        if (state.Schema is not (1 or 2 or 3)) throw new InvalidDataException($"Unsupported project state version {state.Schema}. No state was changed.");
+        if (state.Work == null || state.Decisions == null || state.Events == null) throw new InvalidDataException("Saved history is malformed.");
+        state.HistoricalWorkIds ??= [];
+        foreach(var work in state.Work){work.ModulePins ??= [];work.CandidateModulePins ??= [];work.ContextRefs ??= [];}
+        if(!state.WorkMapMigrationComplete && state.Work.Count>0 && (state.Maps==null || state.Maps.Count==0))
         {
-            var backup = StatePath + ".schema1.bak";
-            if (!File.Exists(backup)) File.Copy(StatePath, backup, false);
-            state.Maps ??= []; state.Schema = 2;
+            BackupOriginal(state.Schema,original);LegacyMaps.Synthesize(state);
+            state.HistoricalWorkIds=state.HistoricalWorkIds.Concat(state.Work.Select(w=>w.Id)).Distinct(StringComparer.Ordinal).ToList();
+            state.Schema=3;state.WorkMapMigrationComplete=true;
+        }
+        else if(state.Schema is 1 or 2)
+        {
+            BackupOriginal(state.Schema,original);state.Maps ??= [];state.Schema=3;state.WorkMapMigrationComplete=true;
         }
         if (state.Maps == null) throw new InvalidDataException("Task maps are malformed; state was not changed.");
         if (state.Work == null || state.Work.Any(x => x.PublishedPathObjects == null) || state.Conflicts == null || state.PeerMessages == null || state.InterruptRequests == null || state.Escalations == null) throw new InvalidDataException("Conflict protocol state is malformed; state was not changed.");
@@ -30,6 +38,14 @@ internal sealed class StateStore
         }
         catch (Exception e) when (e is ArgumentException or NullReferenceException) { throw new InvalidDataException("Saved task maps are invalid; state was not changed.", e); }
         return state;
+    }
+    private void BackupOriginal(int schema, byte[] bytes)
+    {
+        var backup=StatePath+$".schema{schema}.bak";
+        if(File.Exists(backup)){if(!File.ReadAllBytes(backup).AsSpan().SequenceEqual(bytes))throw new IOException("Migration backup differs from original state.");return;}
+        var temp=backup+"."+Guid.NewGuid().ToString("N")+".new";
+        using(var file=new FileStream(temp,FileMode.CreateNew,FileAccess.Write,FileShare.None)){file.Write(bytes);file.Flush(true);}
+        try{File.Move(temp,backup);}catch(IOException)when(File.Exists(backup)){File.Delete(temp);if(!File.ReadAllBytes(backup).AsSpan().SequenceEqual(bytes))throw new IOException("Concurrent migration backup differs from original state.");}
     }
     public void Save(ProjectState state)
     {

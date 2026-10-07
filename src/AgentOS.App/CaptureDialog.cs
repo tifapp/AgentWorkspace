@@ -14,6 +14,7 @@ public sealed class CaptureDialog : IDisposable
     readonly CaptureResult capture;
     readonly Func<TaskMap, CancellationToken, Task<TaskMap>> save;
     readonly Func<TaskMap, CancellationToken, Task<IReadOnlyList<string>>> start;
+    readonly Func<string,ContextArtifactKind,byte[],string,DateTimeOffset,CancellationToken,Task<ContextArtifactRef>> accept;
     readonly CancellationToken closing;
     readonly ContentDialog dialog = new() { Title = "Capture context", CloseButtonText = "Close" };
     readonly TextBox project = new() { Header = "Local Git project", PlaceholderText = @"C:\Projects\my-project" };
@@ -24,7 +25,7 @@ public sealed class CaptureDialog : IDisposable
     readonly TextBox acceptance = new() { Header = "Acceptance criteria", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = 54 };
     readonly TextBox visible = new() { Header = "Visible foreground text", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = 75, MaxHeight = 150 };
     readonly CheckBox includeText = new() { Content = "Include visible text", IsChecked = true };
-    readonly CheckBox includeImage = new() { Content = "Include screenshot", IsChecked = true };
+    readonly CheckBox includeImage = new() { Content = "Include screenshot", IsChecked = false };
     readonly TextBox cropX = new() { Header = "Crop X", Width = 72 }, cropY = new() { Header = "Y", Width = 72 }, cropW = new() { Header = "Width", Width = 80 }, cropH = new() { Header = "Height", Width = 80 };
     readonly Image preview = new() { MaxHeight = 170, Stretch = Microsoft.UI.Xaml.Media.Stretch.Uniform };
     readonly TextBlock message = new() { TextWrapping = TextWrapping.Wrap };
@@ -41,15 +42,16 @@ public sealed class CaptureDialog : IDisposable
     TaskMap? saved;
     MapTask? editing;
     long revision;
-    bool disposed, busy, startArmed;
+    bool disposed, busy, startArmed, fillingEditor;
     public CaptureDialog(CaptureResult result, Func<TaskMap, CancellationToken, Task<TaskMap>> saveDraft,
-        Func<TaskMap, CancellationToken, Task<IReadOnlyList<string>>> startSelected, CancellationToken closingToken)
-    { capture = result; save = saveDraft; start = startSelected; closing = closingToken; Build(); }
+        Func<TaskMap, CancellationToken, Task<IReadOnlyList<string>>> startSelected, Func<string,ContextArtifactKind,byte[],string,DateTimeOffset,CancellationToken,Task<ContextArtifactRef>> acceptContext, CancellationToken closingToken)
+    { capture = result; save = saveDraft; start = startSelected; accept = acceptContext; closing = closingToken; Build(); }
 
     static Button Action(string label, Action call)
     { var b = new Button { Content = label }; b.Click += (_, _) => call(); return b; }
     static TextBlock Note(string text) => new() { Text = text, TextWrapping = TextWrapping.Wrap };
-    void Changed() { revision++; generation?.Cancel(); saved = null; startArmed = false; startButton.Content = "Review and start selected"; startButton.IsEnabled = false; }
+    void Changed()=>Changed(true);
+    void Changed(bool cancelGeneration) { revision++; if(cancelGeneration)generation?.Cancel(); saved = null; startArmed = false; startButton.Content = "Review and start selected"; startButton.IsEnabled = false; }
     void Say(string text) { message.Text = text; }
 
     void Build()
@@ -58,7 +60,7 @@ public sealed class CaptureDialog : IDisposable
         body.Children.Add(project); body.Children.Add(cliPath);
         var context = capture.Context;
         body.Children.Add(Note(context == null ? "Capture unavailable: " + capture.Status + ". You can still create a manual draft."
-            : "Foreground: " + context.Window.App + " � " + context.Window.Title));
+            : "Foreground: " + context.Window.App + " | " + context.Window.Title));
         body.Children.Add(includeText); body.Children.Add(visible);
         body.Children.Add(includeImage); body.Children.Add(preview);
 
@@ -98,17 +100,18 @@ public sealed class CaptureDialog : IDisposable
         includeImage.IsEnabled = context?.ScreenshotPng != null;
         if (context?.ScreenshotBounds is { } bounds)
         { cropX.Text = "0"; cropY.Text = "0"; cropW.Text = bounds.Width.ToString(); cropH.Text = bounds.Height.ToString(); }
-        _ = SetPreviewAsync(context?.ScreenshotPng);
+        _ = SetPreviewAsync(null);
         var first = new MapTask { Title = context?.ManualTitle ?? "New task", Prompt = "Describe the requested work", Acceptance = "Describe the verifiable result" };
         draft.Tasks.Add(first);
         editing = first;
         taskTitle.Text = first.Title; prompt.Text = first.Prompt; acceptance.Text = first.Acceptance;
         editor.Children.Add(taskTitle); editor.Children.Add(prompt); editor.Children.Add(acceptance);
         foreach (var box in new[] { project, mapTitle, taskTitle, prompt, acceptance, visible })
-            box.TextChanged += (_, _) => { SyncEditing(); Changed(); };
+            box.TextChanged += (_, _) => { if(fillingEditor)return;SyncEditing(); Changed(); };
         includeText.Checked += (_, _) => Changed(); includeText.Unchecked += (_, _) => Changed();
-        includeImage.Checked += (_, _) => Changed(); includeImage.Unchecked += (_, _) => Changed();
+        includeImage.Checked += (_, _) => { _=SetPreviewAsync(cropped);Changed(); }; includeImage.Unchecked += (_, _) => { _=SetPreviewAsync(null);Changed(); };
         canvas = new TaskMapCanvas(draft);
+        canvas.ProjectPath=()=>project.Text.Trim();
         canvas.ResolveTaskResult = id => ProjectClient.InspectAsync(project.Text.Trim(), id);
         canvas.SelectionChanged += task => { if (task != null) Edit(task); };
         canvas.MapChanged += Changed;
@@ -140,8 +143,8 @@ public sealed class CaptureDialog : IDisposable
     }
     void Edit(MapTask task)
     {
-        SyncEditing(); editing = task;
-        taskTitle.Text = task.Title; prompt.Text = task.Prompt; acceptance.Text = task.Acceptance;
+        if(editing!=null&&draft.Tasks.Contains(editing))SyncEditing();editing=task;
+        fillingEditor=true;taskTitle.Text=task.Title;prompt.Text=task.Prompt;acceptance.Text=task.Acceptance;fillingEditor=false;
         RebuildTaskStrip();
     }
     void RebuildTaskStrip()
@@ -150,7 +153,7 @@ public sealed class CaptureDialog : IDisposable
         foreach (var task in draft.Tasks)
         {
             var current = task;
-            taskStrip.Children.Add(Action(task.Title.Length > 22 ? task.Title[..22] + "�" : task.Title, () => Edit(current)));
+            taskStrip.Children.Add(Action(task.Title.Length > 22 ? task.Title[..22] + "..." : task.Title, () => Edit(current)));
             var selected = new CheckBox { Content = "Start", IsChecked = task.Selected };
             selected.Checked += (_, _) => { task.Selected = true; Changed(); canvas?.Refresh(); };
             selected.Unchecked += (_, _) => { task.Selected = false; Changed(); canvas?.Refresh(); };
@@ -172,15 +175,17 @@ public sealed class CaptureDialog : IDisposable
         draft.Edges.RemoveAll(e => e.FromTaskId == id || e.ToTaskId == id);
         editing = null; Changed(); Edit(draft.Tasks[0]);
     }
+    long previewRevision;
     async Task SetPreviewAsync(byte[]? png)
     {
+        var at=++previewRevision;
         if (png == null) { preview.Source = null; return; }
         try
         {
             using var stream = new InMemoryRandomAccessStream();
             using (var writer = new DataWriter(stream)) { writer.WriteBytes(png); await writer.StoreAsync(); }
             stream.Seek(0);
-            var image = new BitmapImage(); await image.SetSourceAsync(stream); preview.Source = image;
+            var image = new BitmapImage(); await image.SetSourceAsync(stream); if(at==previewRevision)preview.Source = image;
         }
         catch (Exception ex) { Say("Screenshot preview unavailable: " + ex.Message); }
     }
@@ -197,7 +202,7 @@ public sealed class CaptureDialog : IDisposable
         {
             var result = capture.Context.CropScreenshot(new CaptureRect(x, y, w, h));
             cropped = result.ScreenshotPng; cropBounds = result.ScreenshotBounds;
-            await SetPreviewAsync(cropped); Changed(); Say("Crop applied locally.");
+            await SetPreviewAsync(includeImage.IsChecked==true?cropped:null); Changed(); Say("Crop applied locally.");
         }
         catch (Exception ex) { Say("Crop failed: " + ex.Message); }
     }
@@ -205,7 +210,7 @@ public sealed class CaptureDialog : IDisposable
     {
         var source = capture.Context ?? throw new InvalidOperationException("Capture a foreground window before generating suggestions.");
         var text = includeText.IsChecked == true ? visible.Text : "";
-        var png = includeImage.IsChecked == true ? cropped ?? source.ScreenshotPng : null;
+        var png = includeImage.IsChecked == true ? cropped ?? throw new InvalidOperationException("Apply a crop before including the screenshot.") : null;
         return new ForegroundContext(source.Id, source.CapturedAt, source.Window, text, png, png == null ? null : cropBounds ?? source.ScreenshotBounds);
     }
     async Task GenerateAsync()
@@ -217,15 +222,15 @@ public sealed class CaptureDialog : IDisposable
         generation.CancelAfter(TimeSpan.FromSeconds(20));
         var token = generation.Token; var at = revision;
         busy = true; generate.IsEnabled = false; cancelGeneration.IsEnabled = true;
-        Say("Generating suggestions�");
+        Say("Generating suggestions...");
         try
         {
             var cli = cliPath.Text.Trim();
             if (cli.Length == 0 || !File.Exists(cli)) throw new FileNotFoundException("Choose an installed Codex CLI path. Manual editing remains available.");
             var context = IncludedContext();
-            var proposed = await new CodexContextMicroagent(cli).ProposeAsync(context, at.ToString(), token);
+            var proposed = await new CodexContextMicroagent(cli).ProposeAsync(context, at.ToString(), token, includeScreenshot:includeImage.IsChecked==true);
             if (at != revision || proposed.IsStale(context.Id, at.ToString())) { Say("Context changed; old suggestions were discarded. Generate again."); return; }
-            mapTitle.Text = proposed.Title;
+            fillingEditor=true;mapTitle.Text=proposed.Title;draft.Title=proposed.Title;fillingEditor=false;
             for (int i = 0; i < 3; i++)
             {
                 var suggestion = proposed.Suggestions[i].Text;
@@ -244,32 +249,40 @@ public sealed class CaptureDialog : IDisposable
                     foreach (var dependency in node.DependsOn) draft.Edges.Add(new MapEdge(ids[dependency], ids[node.Id], MapEdgeKind.Dependency));
                 editing = null; Edit(draft.Tasks[0]);
             }
-            Changed(); Say("Review the three suggestions and draft tasks. Nothing has started.");
+            Changed(cancelGeneration:false); Say("Review the three suggestions and draft tasks. Nothing has started.");
         }
         catch (OperationCanceledException) { Say("Suggestion generation canceled. Manual editing is available."); }
         catch (Exception ex) { Say("Suggestions unavailable: " + ex.Message + " Edit the draft manually or retry."); }
         finally { busy = false; generate.IsEnabled = true; cancelGeneration.IsEnabled = false; }
     }
-    async Task SaveAsync()
+    static string CaptureSource(ForegroundContext context,string kind,CaptureRect? bounds=null)
+    {
+        var area=bounds is {} b?$" bounds=[{b.X},{b.Y},{b.Width},{b.Height}]":"";
+        var raw=$"foreground {kind}:{area} pid={context.Window.ProcessId} born={context.Window.ProcessCreated:O} app={context.Window.App} title={context.Window.Title}";
+        return raw.Length<=512?raw:raw[..512];
+    }    async Task SaveAsync()
     {
         if (busy) return;
         SyncEditing();
         draft.ProjectPath = project.Text.Trim();
         if (string.IsNullOrWhiteSpace(draft.ProjectPath)) { Say("Choose a local Git project."); return; }
+        var at=revision;busy=true;saveButton.IsEnabled=false;
         try
         {
             TaskMapRules.Validate(draft);
+            if(includeImage.IsChecked==true&&cropped==null)throw new InvalidOperationException("Apply a crop before including the screenshot.");
             if (capture.Context is { } context)
             {
-                draft.Citations.RemoveAll(c => c.Source.StartsWith("foreground ", StringComparison.Ordinal));
-                if (includeText.IsChecked == true && !string.IsNullOrWhiteSpace(visible.Text))
-                    draft.Citations.Add(ContextCitation.Create("foreground visible text:" + context.Window.App, Encoding.UTF8.GetBytes(visible.Text)));
-                if (includeImage.IsChecked == true && (cropped ?? context.ScreenshotPng) is { } png)
-                    draft.Citations.Add(ContextCitation.Create("foreground screenshot:" + context.Window.App, png));
+                draft.ContextRefs.RemoveAll(c=>c.Source.StartsWith("foreground ",StringComparison.Ordinal));
+                if(includeText.IsChecked==true&&!string.IsNullOrWhiteSpace(visible.Text))
+                    draft.ContextRefs.Add(await accept(draft.ProjectPath,ContextArtifactKind.Text,Encoding.UTF8.GetBytes(visible.Text),CaptureSource(context,"visible text"),context.CapturedAt,closing));
+                if(includeImage.IsChecked==true&&cropped is {} png)
+                    draft.ContextRefs.Add(await accept(draft.ProjectPath,ContextArtifactKind.Png,png,CaptureSource(context,"screenshot",cropBounds??context.ScreenshotBounds),context.CapturedAt,closing));
             }
-            busy = true; saveButton.IsEnabled = false;
-            saved = await save(draft, closing); draft.Revision = saved.Revision;
-            visible.IsReadOnly = true; includeText.IsEnabled = false; includeImage.IsEnabled = false;
+            if(at!=revision)throw new InvalidOperationException("Context changed while saving. Review and save again.");
+            var result=await save(JsonFormat.Copy(draft),closing);
+            if(at!=revision)throw new InvalidOperationException("Draft changed while saving. Review and save again.");
+            saved=result;draft.Revision=result.Revision;            visible.IsReadOnly = true; includeText.IsEnabled = false; includeImage.IsEnabled = false;
             foreach (var box in new[] { cropX, cropY, cropW, cropH }) box.IsReadOnly = true;
             startButton.IsEnabled = saved.Tasks.Any(t => t.Selected);
             Say("Draft saved. No task started. Review selected ready tasks before starting.");

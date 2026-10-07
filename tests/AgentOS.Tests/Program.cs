@@ -72,11 +72,11 @@ await TestAsync("Resource admission and VM refusal", AgentOS.Tests.ResourceAdmis
 await TestAsync("External effects request, receipt, and refusal", AgentOS.Tests.ExternalEffectTests.RunAsync);
 await TestAsync("Feature integration: map attempts and interaction journal", () => AgentOS.Tests.FeatureIntegrationChecks.RunAsync(Path.Combine(root, "feature-integration")));
 await TestAsync("Notifications: persistence, deduplication, history, quiet hours", () => AgentOS.Tests.NotificationChecks.RunAsync(Path.Combine(root, "notifications")));
-foreach (var helperName in new[] { "GitProfileChecks", "ExecutionProfileChecks", "ContextArtifactChecks", "UpdateProtocolChecks", "ForegroundCaptureChecks", "MapInteractionChecks", "WorkExecutionChecks", "ExternalDeliveryChecks", "NotificationDeliveryChecks" })
+foreach (var helperName in new[] { "GitProfileChecks", "ExecutionProfileChecks", "ContextArtifactChecks", "ForegroundCaptureChecks", "MapInteractionChecks", "WorkExecutionChecks", "WorkExecutionAdversarialChecks", "ExternalDeliveryChecks", "NotificationDeliveryChecks" })
 {
     var type = typeof(Program).Assembly.GetType("AgentOS.Tests." + helperName);
     var run = type?.GetMethod("RunAsync", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
-    if (run == null) { Console.WriteLine("NOT PRESENT " + helperName + " (no coverage claimed)"); continue; }
+    if (run == null) { await TestAsync(helperName, () => throw new InvalidOperationException("Required fixture helper missing: " + helperName)); continue; }
     await TestAsync(helperName, async () =>
     {
         var parameters = run.GetParameters();

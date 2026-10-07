@@ -14,6 +14,7 @@ public sealed class TaskInteraction
  public string? TargetWorkId { get; set; }
  public string? Scope { get; set; }
  public string? TurnId { get; set; }
+ public DateTimeOffset? DeliveredAt { get; set; }
  public string? RelatedId { get; set; }
  public bool Required { get; set; }
  public WaitKind? WaitKind { get; set; }
@@ -59,13 +60,21 @@ public sealed class TaskInteractionStore
  {
   lock (_gate) { if (_journal.Items.Any(x => x.Id == item.Id)) throw new ArgumentException("Duplicate interaction ID."); _journal.Items.Add(item); Save(); return JsonFormat.Copy(item); }
  }
- public TaskInteraction Change(string id, InteractionStatus status, string? response = null, string? turnId = null)
+ public TaskInteraction AddFollowup(string workId,string task,bool required)
+ {
+  lock(_gate)
+  {
+   var obligation=required?new TaskInteraction{WorkId=workId,Kind=InteractionKind.Obligation,Status=InteractionStatus.Pending,Required=true,Text=task}:null;
+   var proposal=new TaskInteraction{WorkId=workId,Kind=InteractionKind.Followup,Status=InteractionStatus.Pending,Required=required,Text=task,RelatedId=obligation?.Id};
+   if(obligation!=null)_journal.Items.Add(obligation);_journal.Items.Add(proposal);Save();return JsonFormat.Copy(proposal);
+  }
+ } public TaskInteraction Change(string id, InteractionStatus status, string? response = null, string? turnId = null)
  {
   lock (_gate)
   {
    ExpireDue(); var item = Find(id); if (item.Status is InteractionStatus.Canceled or InteractionStatus.Expired or InteractionStatus.Rejected or InteractionStatus.Resolved or InteractionStatus.Acknowledged or InteractionStatus.Replied) throw new InvalidOperationException("Interaction is already terminal."); item.Status = status; item.UpdatedAt = DateTimeOffset.UtcNow;
-   if (response != null) item.Response = response; if (turnId != null) item.TurnId = turnId;
-   Save(); if (_pending.Remove(id, out var waiter)) waiter.TrySetResult(JsonFormat.Copy(item)); return JsonFormat.Copy(item);
+   if (response != null) item.Response = response; if (turnId != null) { item.TurnId = turnId; item.DeliveredAt = DateTimeOffset.UtcNow; }
+   Save(); if (status != InteractionStatus.Pending && _pending.Remove(id, out var waiter)) waiter.TrySetResult(JsonFormat.Copy(item)); return JsonFormat.Copy(item);
   }
  }
  public async Task<TaskInteraction> AwaitReplyAsync(string id, CancellationToken cancel)
@@ -87,7 +96,7 @@ public sealed class TaskInteractionStore
   {
    ExpireDue(); var item = Find(id);
    if (item.Kind != InteractionKind.Peer || item.Status != InteractionStatus.Pending || item.TargetWorkId != oldTarget) throw new InvalidOperationException("Peer request cannot be handed off.");
-   item.TargetWorkId = newTarget; item.Response = "Handed off from " + oldTarget; item.UpdatedAt = DateTimeOffset.UtcNow; Save(); return JsonFormat.Copy(item);
+   item.TargetWorkId = newTarget; item.TurnId = null; item.DeliveredAt = null; item.Response = "Handed off from " + oldTarget; item.UpdatedAt = DateTimeOffset.UtcNow; Save(); return JsonFormat.Copy(item);
   }
  } public void Recover(Func<string, bool> alive)
  {
@@ -139,7 +148,7 @@ public sealed partial class ProjectRuntime
  public Task<TaskInteraction> SendSteeringAsync(string workId, string text)
  {
   var work = Find(workId); if (!work.IsActive) throw new InvalidOperationException("The task is no longer active. Start an authorized followup turn.");
-  if (string.IsNullOrWhiteSpace(text)) throw new ArgumentException("Steering text is required.");
+  if (string.IsNullOrWhiteSpace(text)||text.Length>16000) throw new ArgumentException("Steering text must contain 1 to 16000 characters.");
   return Task.FromResult(_interactions.Add(new TaskInteraction { WorkId = workId, Kind = InteractionKind.Steering, Status = InteractionStatus.Queued, Text = text.Trim() }));
  }
  public Task<TaskInteraction> ReplyClarificationAsync(string workId, string requestId, string response)
@@ -154,14 +163,14 @@ public sealed partial class ProjectRuntime
   var sender = Find(workId); var target = Find(targetWorkId);
   if (!sender.IsActive || !target.IsActive) throw new InvalidOperationException("Both peer tasks must be active.");
   if (workId == targetWorkId) throw new ArgumentException("A task cannot ask itself.");
-  if (string.IsNullOrWhiteSpace(question)) throw new ArgumentException("A peer request needs a question.");
-  if (deadline.HasValue && deadline.Value <= DateTimeOffset.UtcNow) throw new ArgumentException("Peer deadline has passed.");
+  if (string.IsNullOrWhiteSpace(question)||question.Length>16000) throw new ArgumentException("A peer request needs 1 to 16000 characters.");
+  if (deadline.HasValue && (deadline.Value <= DateTimeOffset.UtcNow || deadline.Value > DateTimeOffset.UtcNow.AddDays(30))) throw new ArgumentException("Peer deadline has passed.");
   return _interactions.Add(new TaskInteraction { WorkId = workId, TargetWorkId = targetWorkId, Kind = InteractionKind.Peer, Status = InteractionStatus.Pending, Text = question, Deadline = deadline });
  }
  public TaskInteraction AcknowledgePeer(string targetWorkId, string requestId, string response)
  {
-  Find(targetWorkId); var item = _interactions.Get(requestId);
-  if (item.TargetWorkId != targetWorkId || item.Kind != InteractionKind.Peer || item.Status != InteractionStatus.Pending) throw new InvalidOperationException("No pending peer request for this task.");
+  if(!Find(targetWorkId).IsActive)throw new InvalidOperationException("Peer recipient is no longer active."); var item = _interactions.Get(requestId);
+  if (item.TargetWorkId != targetWorkId || item.Kind != InteractionKind.Peer || item.Status != InteractionStatus.Pending || string.IsNullOrWhiteSpace(response) || response.Length>16000) throw new InvalidOperationException("No pending peer request or valid response for this task.");
   return _interactions.Change(requestId, InteractionStatus.Acknowledged, response);
  }
  public TaskInteraction HandoffPeer(string targetWorkId, string requestId, string newTargetWorkId)
@@ -175,22 +184,37 @@ public sealed partial class ProjectRuntime
   Find(workId); var item = _interactions.Get(waitId);
   if (item.WorkId != workId || item.Kind != InteractionKind.Wait || item.Status != InteractionStatus.Pending) throw new InvalidOperationException("No pending wait for this task.");
   if (item.WaitKind != WaitKind.Resource) throw new InvalidOperationException("Only resource waits require explicit resolution.");
-  return _interactions.Change(waitId, InteractionStatus.Resolved, resolution);
+  if(string.IsNullOrWhiteSpace(resolution)||resolution.Length>16000)throw new ArgumentException("Resource resolution must contain 1 to 16000 characters.");
+  return _interactions.Change(waitId, InteractionStatus.Resolved, resolution.Trim());
  }
- public async Task<string> AcceptFollowup(string workId, string proposalId)
+ public IReadOnlyList<TaskInteraction> Inbox(string workId,string? turnId=null)
  {
-  Find(workId); var item = _interactions.Get(proposalId);
-  if (item.WorkId != workId || item.Kind != InteractionKind.Followup || item.Status != InteractionStatus.Pending) throw new InvalidOperationException("No pending followup proposal.");
-  var id = await StartAsync(item.Text, parentId: workId, externalRequestId: item.Id);
-  _interactions.Change(item.Id, InteractionStatus.Acknowledged, id);
-  return id;
+  Find(workId);return _interactions.Inspect(workId).Where(x=>(x.WorkId==workId||x.TargetWorkId==workId)&&(x.Kind!=InteractionKind.Steering||(x.WorkId==workId&&x.TurnId==turnId&&turnId!=null&&x.Status is InteractionStatus.Delivered or InteractionStatus.Acknowledged))).OrderByDescending(x=>x.CreatedAt).Take(50).ToArray();
  }
- public TaskInteraction ResolveObligation(string workId, string obligationId, string resolution)
+ public TaskInteraction AcknowledgeMessage(string workId,string turnId,string messageId)
+ {
+  Find(workId);var item=_interactions.Get(messageId);if(item.WorkId!=workId||item.Kind!=InteractionKind.Steering||item.Status!=InteractionStatus.Delivered||item.TurnId!=turnId||string.IsNullOrWhiteSpace(turnId))throw new InvalidOperationException("No delivered steering message in this task turn.");return _interactions.Change(messageId,InteractionStatus.Acknowledged,"Explicit agent acknowledgement.");
+ }
+ public TaskInteraction ProposeFollowup(string workId,string task,bool required)
+ {
+  if(string.IsNullOrWhiteSpace(task)||task.Length>16000)throw new ArgumentException("Followup task must contain 1 to 16000 characters.");TaskInteraction proposal;
+  lock(_sync){if(!Find(workId).IsActive)throw new InvalidOperationException("Only an active task can propose followup work.");proposal=_interactions.AddFollowup(workId,task.Trim(),required);UpdateMapStatuses();Save();}
+  Changed?.Invoke();return proposal;
+ }
+ public Task<string> AcceptFollowup(string workId,string proposalId)
+ {
+  string id;lock(_sync){Find(workId);var item=_interactions.Get(proposalId);if(item.WorkId!=workId||item.Kind!=InteractionKind.Followup||item.Status!=InteractionStatus.Pending)throw new InvalidOperationException("No pending followup proposal.");id=StartAsync(item.Text,parentId:workId,externalRequestId:item.Id).GetAwaiter().GetResult();_interactions.Change(item.Id,InteractionStatus.Acknowledged,id);UpdateMapStatuses();Save();}Changed?.Invoke();return Task.FromResult(id);
+ }
+ public TaskInteraction RejectFollowup(string workId,string proposalId,string reason)
+ {
+  if(string.IsNullOrWhiteSpace(reason))throw new ArgumentException("A rejection reason is required.");TaskInteraction rejected;
+  lock(_sync){Find(workId);var item=_interactions.Get(proposalId);if(item.WorkId!=workId||item.Kind!=InteractionKind.Followup||item.Status!=InteractionStatus.Pending)throw new InvalidOperationException("No pending followup proposal.");rejected=_interactions.Change(proposalId,InteractionStatus.Rejected,reason.Trim());UpdateMapStatuses();Save();}Changed?.Invoke();return rejected;
+ } public TaskInteraction ResolveObligation(string workId, string obligationId, string resolution)
  {
   Find(workId); var item = _interactions.Get(obligationId);
   if (item.WorkId != workId || item.Kind != InteractionKind.Obligation || item.Status != InteractionStatus.Pending) throw new InvalidOperationException("No pending obligation.");
   if (string.IsNullOrWhiteSpace(resolution)) throw new ArgumentException("A resolution is required.");
-  return _interactions.Change(obligationId, InteractionStatus.Resolved, resolution);
+  var settled=_interactions.Change(obligationId,InteractionStatus.Resolved,resolution);lock(_sync){UpdateMapStatuses();Save();}Changed?.Invoke();return settled;
  }
  public TaskInteraction CreateWait(string workId, WaitKind kind, string targetId, DateTimeOffset? deadline = null)
  {

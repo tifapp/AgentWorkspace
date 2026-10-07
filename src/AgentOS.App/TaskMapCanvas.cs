@@ -25,6 +25,7 @@ public sealed class TaskMapCanvas : UserControl
     bool panning;
     Point panStart;
     public Func<string, Task<WorkUnit?>>? ResolveTaskResult { get; set; }
+    public Func<string>? ProjectPath { get; set; }
     Point dragStart;
     double zoom = 1;
     bool collapsed;
@@ -73,21 +74,27 @@ public sealed class TaskMapCanvas : UserControl
                         if (item is Windows.Storage.StorageFile file)
                         {
                             using var input = await file.OpenStreamForReadAsync();
-                            if (input.Length > 8_000_000) throw new IOException("File citation exceeds 8 MB.");
-                            using var bytes = new MemoryStream(); await input.CopyToAsync(bytes);
-                            AddCitation("file:" + file.Name, bytes.ToArray());
+                            if(input.Length>ContextArtifacts.MaxImageBytes)throw new IOException("File context exceeds 8 MB.");
+                            using var bytes=new MemoryStream();var buffer=new byte[81920];int count;while((count=await input.ReadAsync(buffer))>0){if(bytes.Length+count>ContextArtifacts.MaxImageBytes)throw new IOException("File context exceeds 8 MB.");bytes.Write(buffer,0,count);}
+                            await AddCitationAsync("file:"+file.Name,bytes.ToArray());
                         }
                 else if (e.DataView.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.Text))
-                    { var value = await e.DataView.GetTextAsync(); if (value.StartsWith("task-result:", StringComparison.Ordinal) && ResolveTaskResult != null) { var work = await ResolveTaskResult(value[12..].Trim()); if (work == null) throw new ArgumentException("Task result not found in this project."); AddTaskResultCitation(work); } else AddCitation("dropped context", System.Text.Encoding.UTF8.GetBytes(value)); }
+                    { var value = await e.DataView.GetTextAsync(); if (value.StartsWith("task-result:", StringComparison.Ordinal) && ResolveTaskResult != null) { var work = await ResolveTaskResult(value[12..].Trim()); if (work == null) throw new ArgumentException("Task result not found in this project."); await AddTaskResultCitationAsync(work); } else await AddCitationAsync("dropped context", System.Text.Encoding.UTF8.GetBytes(value)); }
             }
             catch (Exception ex) { status.Text = ex.Message; }
         };
         Render();
     }
     static Button Action(string label, Action call) { var b = new Button { Content = label }; b.Click += (_, _) => call(); return b; }
-    public void AddCitation(string source, byte[] bytes) { if (bytes.Length == 0) return; map.Citations.Add(ContextCitation.Create(source, bytes)); MapChanged?.Invoke(); status.Text = "Cited " + source + " by SHA-256."; }
-    public void AddTaskResultCitation(WorkUnit work) => AddCitation("task result:" + work.Id, System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { work.Id, work.Status, work.CodexReport, work.CandidateCommit, work.IntegratedCommit })));
-    Point Position(string id) { if (positions.TryGetValue(id, out var p)) return p; var i = map.Tasks.FindIndex(t => t.Id == id); return new Point(20 + i % 3 * 280, 25 + i / 3 * 150); }
+    public async Task AddCitationAsync(string source,byte[] bytes,CancellationToken cancel=default)
+    {
+        if(bytes.Length==0)return;var project=ProjectPath?.Invoke();if(string.IsNullOrWhiteSpace(project))throw new InvalidOperationException("Choose an open project before accepting dropped context.");
+        bool png=bytes.Length>=8&&bytes.AsSpan(0,8).SequenceEqual(new byte[]{137,80,78,71,13,10,26,10});
+        if(bytes.Length>(png?ContextArtifacts.MaxImageBytes:ContextArtifacts.MaxTextBytes))throw new IOException("Dropped context exceeds its size limit.");
+        var reference=await ProjectClient.SaveContextAsync(project,png?ContextArtifactKind.Png:ContextArtifactKind.Text,bytes,source,DateTimeOffset.UtcNow,cancel);
+        map.ContextRefs.Add(reference);MapChanged?.Invoke();status.Text="Accepted "+source+" for this draft.";
+    }
+    public Task AddTaskResultCitationAsync(WorkUnit work,CancellationToken cancel=default)=>AddCitationAsync("task result:"+work.Id,System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new{work.Id,work.Status,work.CodexReport,work.CandidateCommit,work.IntegratedCommit})),cancel);    Point Position(string id) { if (positions.TryGetValue(id, out var p)) return p; var i = map.Tasks.FindIndex(t => t.Id == id); return new Point(20 + i % 3 * 280, 25 + i / 3 * 150); }
     public void AutoLayout() { for (int i = 0; i < map.Tasks.Count; i++) positions[map.Tasks[i].Id] = new Point(20 + i % 3 * 280, 25 + i / 3 * 150); SaveLayout(); Render(); }
     public void Fit() { zoom = Math.Clamp(Math.Min(Math.Max(scroll.ActualWidth, 350) / 900, Math.Max(scroll.ActualHeight, 220) / 560), .4, 1.4); Zoom(0); scroll.ChangeView(0, 0, null); }
     void Zoom(double change) { zoom = Math.Clamp(zoom + change, .4, 2); graph.RenderTransform = new ScaleTransform { ScaleX = zoom, ScaleY = zoom }; }
@@ -108,7 +115,7 @@ public sealed class TaskMapCanvas : UserControl
         {
             from.Items.Add(new ComboBoxItem { Content = task.Title, Tag = task.Id });
             to.Items.Add(new ComboBoxItem { Content = task.Title, Tag = task.Id });
-            list.Items.Add(new ListViewItem { Content = task.Title + " � " + TaskStatusLabel(task.Status) + (task.Selected ? " � selected" : ""), Tag = task.Id });
+            list.Items.Add(new ListViewItem { Content = task.Title + " ï¿½ " + TaskStatusLabel(task.Status) + (task.Selected ? " ï¿½ selected" : ""), Tag = task.Id });
         }
         from.SelectedItem = from.Items.OfType<ComboBoxItem>().FirstOrDefault(x => (string)x.Tag == (fromId ?? selected));
         to.SelectedItem = to.Items.OfType<ComboBoxItem>().FirstOrDefault(x => (string)x.Tag == toId);
@@ -122,7 +129,7 @@ public sealed class TaskMapCanvas : UserControl
         foreach (var task in visible)
         {
             var p = Position(task.Id);
-            var node = new Button { Content = collapsed ? task.Title : task.Title + "\n" + TaskStatusLabel(task.Status) + (task.Selected ? " � selected" : ""), Width = 220, Height = collapsed ? 55 : 84, BorderThickness = new Thickness(selected == task.Id ? 3 : 1) };
+            var node = new Button { Content = collapsed ? task.Title : task.Title + "\n" + TaskStatusLabel(task.Status) + (task.Selected ? " ï¿½ selected" : ""), Width = 220, Height = collapsed ? 55 : 84, BorderThickness = new Thickness(selected == task.Id ? 3 : 1) };
             AutomationProperties.SetName(node, task.Title + ", " + TaskStatusLabel(task.Status));
             node.Click += (_, _) => Select(task.Id);
             node.PointerPressed += (_, e) => { dragging = task.Id; dragStart = e.GetCurrentPoint(graph).Position; };

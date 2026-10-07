@@ -3,14 +3,22 @@ using System.Text.Json.Serialization;
 
 namespace AgentOS.Core;
 
+public enum WorkRelationship { Unknown, Original, Revision, Followup }
 public enum WorkStatus { Preparing, Running, Private, Waiting, Validating, Completed, Stale, Failed, Canceled, Unknown, NeedsResponse, Parked, Abandoned }
 public enum DecisionStatus { Pending, Approved, Rejected, Completed, Stale, Unknown }
 
 public sealed class ProjectState
 {
-    public int Schema { get; set; } = 2;
+    public int Schema { get; set; } = 3;
+    public List<string> HistoricalWorkIds { get; set; } = [];
+    public bool WorkMapMigrationComplete { get; set; }
     public long Generation { get; set; }
     public string ProjectPath { get; set; } = "";
+    public string? SourceCommonIdentity { get; set; }
+    public string? SourceObjectIdentity { get; set; }
+    public string? SourceCommonDirectory { get; set; }
+    public string? SourceKind { get; set; }
+    [JsonExtensionData] public Dictionary<string, JsonElement>? AdditionalFields { get; set; }
     public string ProjectName => Path.GetFileName(ProjectPath);
     public string IntegratedCommit { get; set; } = "";
     public string ValidationCommand { get; set; } = "";
@@ -32,11 +40,16 @@ public sealed class WorkUnit
     public string? Title { get; set; }
     public string? CodexReport { get; set; }
     public string? ParentId { get; set; }
+    public WorkRelationship Relationship { get; set; }
     public string? ExternalRequestId { get; set; }
     public WorkStatus Status { get; set; } = WorkStatus.Preparing;
     public string Detail { get; set; } = "Preparing a private workspace.";
     public string Workspace { get; set; } = "";
     public string BaseCommit { get; set; } = "";
+    public string? SourceHead { get; set; }
+    public List<ModulePin> ModulePins { get; set; } = [];
+    public List<ModulePin> CandidateModulePins { get; set; } = [];
+    public List<ContextArtifactRef> ContextRefs { get; set; } = [];
     public string? CandidateCommit { get; set; }
     public string? IntegratedCommit { get; set; }
     public string? PendingCommit { get; set; }
@@ -46,6 +59,9 @@ public sealed class WorkUnit
     public string? HostVersion { get; set; }
     public string? HostModel { get; set; }
     public string ValidationCommand { get; set; } = "";
+    public string ExecutionProfileSnapshot { get; set; } = "";
+    public string ExecutionProfileSha256 { get; set; } = "";
+    public bool SdkShutdownDebt { get; set; }
     public bool AutoIntegrate { get; set; } = true;
     public bool WorkspaceRemoved { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
@@ -55,10 +71,11 @@ public sealed class WorkUnit
     public string Diff { get; set; } = "";
     public List<ValidationEvidence> Evidence { get; set; } = [];
     public string StatusLabel => Status switch { WorkStatus.Private => "Private candidate", WorkStatus.NeedsResponse => "Needs response", WorkStatus.Parked => "Parked conflict", WorkStatus.Abandoned => "Abandoned conflict", _ => Status.ToString() };
-    public string ShortTask => (Title ?? Task).Length <= 110 ? Title ?? Task : (Title ?? Task)[..107] + "…";
+    public string ShortTask => (Title ?? Task).Length <= 110 ? Title ?? Task : (Title ?? Task)[..107] + "...";
     public bool IsActive => Status is WorkStatus.Preparing or WorkStatus.Running or WorkStatus.Waiting or WorkStatus.Validating;
 }
 
+public sealed record ModulePin(string Path, string Commit, string SourcePath, string SourceCommonIdentity, string SourceObjectIdentity);
 public sealed class ConflictNotice
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
@@ -114,9 +131,16 @@ public sealed class ValidationEvidence
     public string LogPath { get; set; } = "";
     public string LogSha256 { get; set; } = "";
     public int ExitCode { get; set; }
+    public string GuestReceipt { get; set; } = "";
+    public string GuestInputSha256 { get; set; } = "";
+    public string GuestPostSourceSha256 { get; set; } = "";
+    public string GuestEffectSha256 { get; set; } = "";
+    public string GuestOwnerReceiptSha256 { get; set; } = "";
+    public string ExecutionProfileSha256 { get; set; } = "";
+    public bool ShutdownConfirmed { get; set; } = true;
     public bool SourceUnchanged { get; set; }
     public DateTimeOffset TestedAt { get; set; } = DateTimeOffset.UtcNow;
-    public bool Passed => ExitCode == 0 && SourceUnchanged;
+    public bool Passed => ExitCode == 0 && SourceUnchanged && ShutdownConfirmed;
 }
 
 public sealed class HumanDecision

@@ -26,6 +26,7 @@ try
   map-save <project> <json-file> [data-folder] [expected-revision]
   map-list <project> [data-folder]
   map-start <project> <map-id> [data-folder]
+  map-start-selected <project> <map-id> <expected-revision> <task-id[,task-id...]> [data-folder]
   submit <project> <task> [request-id]
   reply-after <project> <work-id> <text> [request-id]
   peer <project> <work-id> <target-work-id> <question> [deadline]
@@ -33,11 +34,14 @@ try
   handoff-peer <project> <work-id> <request-id> <new-work-id>
   resolve-wait <project> <work-id> <wait-id> <resolution>
   inspect <project> <work-id>
+  sdk-pending <project> <work-id> [data-folder]
+  sdk-reconcile <project> <work-id> <operation-id> [data-folder]
   cancel <project> <work-id>
   interactions <project> [work-id]
   steer <project> <work-id> <text>
   reply <project> <work-id> <clarification-id> <text>
   followup <project> <work-id> <proposal-id>
+  reject-followup <project> <work-id> <proposal-id> <reason>
   resolve <project> <work-id> <obligation-id> <text>
   wait <project> <work-id> task|message|decision|resource <target-id> [deadline]
   cancel-wait <project> <work-id> <wait-id>
@@ -62,7 +66,7 @@ try
         case "update-handshake":
         {
             var h = RuntimeUpdate.Health();
-            if (h.Version != int.Parse(args[1]) || h.StateSchema > int.Parse(args[2]) || !string.Equals(h.AssemblySha256, args[3], StringComparison.OrdinalIgnoreCase) || !new[] { "scoped-drain", "cooperative-exit", "schema2", "signed-msix-handshake" }.All(h.Capabilities.Contains)) throw new InvalidOperationException("Installed CLI protocol, schema, assembly hash or capabilities incompatible.");
+            if (h.Version != int.Parse(args[1]) || h.StateSchema > int.Parse(args[2]) || !string.Equals(h.AssemblySha256, args[3], StringComparison.OrdinalIgnoreCase) || !new[] { "scoped-drain", "cooperative-exit", "schema3", "signed-msix-handshake" }.All(h.Capabilities.Contains)) throw new InvalidOperationException("Installed CLI protocol, schema, assembly hash or capabilities incompatible.");
             Console.WriteLine(JsonSerializer.Serialize(h, JsonFormat.Options)); return 0;
         }
         case "update-restart":
@@ -113,6 +117,14 @@ try
             var work = runtime.Snapshot.Work.Single(w => w.Id == id);
             Console.WriteLine(JsonSerializer.Serialize(work, JsonFormat.Options));
             return work.Status == WorkStatus.Completed ? 0 : 1;
+        }
+        case "sdk-pending":
+        {
+            await using var runtime=await ProjectRuntime.OpenAsync(args[1],args.ElementAtOrDefault(3));Console.WriteLine(runtime.PendingSdkOperationId(args[2])??"No pending SDK operation.");return 0;
+        }
+        case "sdk-reconcile":
+        {
+            await using var runtime=await ProjectRuntime.OpenAsync(args[1],args.ElementAtOrDefault(4));var receipt=await runtime.ReconcileSdkAsync(args[2],args[3]);Console.WriteLine(JsonSerializer.Serialize(receipt,JsonFormat.Options));return receipt.ShutdownConfirmed&&receipt.TrustedCollector?0:1;
         }
         case "status":
         {
@@ -216,6 +228,12 @@ try
             await using var runtime = await ProjectRuntime.OpenAsync(args[1]);
             var id = await runtime.AcceptFollowup(args[2], args[3]); Console.WriteLine(id); await runtime.WaitForIdleAsync(); return 0;
         }
+        case "reject-followup":
+        {
+            var remote=await ProjectClient.RejectFollowupAsync(args[1],args[2],args[3],args[4]);
+            if(remote!=null){Console.WriteLine(JsonSerializer.Serialize(remote,JsonFormat.Options));return 0;}
+            await using var runtime=await ProjectRuntime.OpenAsync(args[1]);Console.WriteLine(JsonSerializer.Serialize(runtime.RejectFollowup(args[2],args[3],args[4]),JsonFormat.Options));return 0;
+        }
         case "resolve":
         {
             var remote = await ProjectClient.ResolveAsync(args[1], args[2], args[3], args[4]);
@@ -267,6 +285,12 @@ try
             if (remoteMaps != null) { Console.WriteLine(JsonSerializer.Serialize(remoteMaps, JsonFormat.Options)); return 0; }
             await using var runtime = await ProjectRuntime.OpenAsync(args[1], args.ElementAtOrDefault(2));
             Console.WriteLine(JsonSerializer.Serialize(runtime.Snapshot.Maps, JsonFormat.Options)); return 0;
+        }
+        case "map-start-selected":
+        {
+            var revision=long.Parse(args[3],System.Globalization.CultureInfo.InvariantCulture);var ids=args[4].Split(',',StringSplitOptions.RemoveEmptyEntries|StringSplitOptions.TrimEntries);
+            var remote=await ProjectClient.StartMapAsync(args[1],args[2],ids,revision);if(remote!=null){Console.WriteLine(JsonSerializer.Serialize(remote,JsonFormat.Options));return 0;}
+            await using var runtime=await ProjectRuntime.OpenAsync(args[1],args.ElementAtOrDefault(5));var started=await runtime.StartSelectedMapTasksAsync(args[2],ids,revision);Console.WriteLine(JsonSerializer.Serialize(started,JsonFormat.Options));await runtime.WaitForIdleAsync();return 0;
         }
         case "map-start":
         {

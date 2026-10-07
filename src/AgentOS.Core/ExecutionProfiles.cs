@@ -3,7 +3,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 namespace AgentOS.Core;
 public enum ExecutionBackend { AppContainer, HyperV, WindowsSandbox }
-public sealed record HyperVProfile(string BaseVhdPath,string BaseVhdSha256,string GuestCredentialTarget,string SwitchName,string? DestinationCredentialTarget=null,string[]? PinnedDestinationIps=null);
+public sealed record HyperVProfile(string BaseVhdPath,string BaseVhdSha256,string GuestCredentialTarget,string SwitchName,string? DestinationCredentialTarget=null,string[]? PinnedDestinationIps=null,string? WorkerCredentialTarget=null);
 public sealed record ExecutionProfile(ExecutionBackend SdkBackend=ExecutionBackend.AppContainer,HyperVProfile? HyperV=null);
 public sealed record ExecutionProfileDescription(ExecutionProfile Profile,bool Available,string Reason,bool DeploymentAvailable=false,string DeploymentReason="Deployment profile is not configured.");
 public sealed class ExecutionProfileRegistry(string projectDataRoot)
@@ -22,8 +22,8 @@ public sealed class ExecutionProfileRegistry(string projectDataRoot)
   ExecutionProfile p;try{p=Current;Validate(p);}catch(Exception e){return new(new(),false,"Invalid execution profile: "+e.GetType().Name);}
   var deployment=HyperVExecution.Probe(p.HyperV);
   var sdk=p.SdkBackend switch {
-   ExecutionBackend.HyperV=>HyperVExecution.Probe(p.HyperV with{DestinationCredentialTarget=null},false),
-   ExecutionBackend.WindowsSandbox=>new HyperVProbe(WindowsVmExecution.Available,WindowsVmExecution.Available?"Windows Sandbox available with networking disabled.":"Windows Sandbox unavailable."),
+   ExecutionBackend.HyperV=>p.HyperV is {} h ? WorkExecution.DescribeAvailability(h) : new HyperVProbe(false,"Hyper-V profile is not configured."),
+   ExecutionBackend.WindowsSandbox=>new HyperVProbe(false,"Windows Sandbox SDK unavailable: exact shutdown proof missing."),
    _=>new HyperVProbe(true,"AppContainer selected.")
   };
   return new(p,sdk.Available,sdk.Reason,deployment.Available,deployment.Reason);
@@ -36,8 +36,8 @@ public sealed class ExecutionProfileRegistry(string projectDataRoot)
   if(!Path.IsPathFullyQualified(h.BaseVhdPath)||!new[]{".vhd",".vhdx"}.Contains(Path.GetExtension(h.BaseVhdPath),StringComparer.OrdinalIgnoreCase)||
    !Regex.IsMatch(h.BaseVhdSha256,"^[A-Fa-f0-9]{64}$")||
    !Regex.IsMatch(h.GuestCredentialTarget,"^AgentOS/HyperV/Guest/[A-Za-z0-9._-]{1,100}$")||
-   !Regex.IsMatch(h.SwitchName,"^[A-Za-z0-9 _.-]{1,100}$")||
-   h.DestinationCredentialTarget is {} t&&!Regex.IsMatch(t,"^AgentOS/HyperV/Destination/[A-Za-z0-9._-]{1,100}$"))
+   !Regex.IsMatch(h.SwitchName,"^[A-Za-z0-9 _.-]{0,100}$")||
+   h.DestinationCredentialTarget is {} t&&!Regex.IsMatch(t,"^AgentOS/HyperV/Destination/[A-Za-z0-9._-]{1,100}$")||h.WorkerCredentialTarget is {} w&&!Regex.IsMatch(w,"^AgentOS/HyperV/Worker/[A-Za-z0-9._-]{1,100}$"))
    throw new ArgumentException("Invalid Hyper-V profile.");
   if(h.PinnedDestinationIps is {Length:>32}||h.PinnedDestinationIps?.Any(x=>!IPAddress.TryParse(x,out var ip)||ip.IsIPv6LinkLocal||IPAddress.IsLoopback(ip)||ip.Equals(IPAddress.Any)||ip.Equals(IPAddress.IPv6Any))==true)throw new ArgumentException("Invalid pinned destination IP.");
  }

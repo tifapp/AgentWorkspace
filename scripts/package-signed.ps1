@@ -57,7 +57,7 @@ foreach($name in 'AgentOS.exe','AgentOS.dll','AgentOS.Core.dll','App.xbf','Agent
  if(!(Test-Path (Join-Path $app $name))){throw "Required app artifact missing: $name"}
 }
 foreach($name in 'AgentOS.Cli.exe','AgentOS.Core.dll'){if(!(Test-Path (Join-Path $cli $name))){throw "Required CLI artifact missing: $name"}}
-$protocol=@{Protocol=1;StateSchema=2;SourceSha256=(Get-FileHash (Join-Path $repo 'src/AgentOS.Core/RuntimeUpdate.cs') -Algorithm SHA256).Hash;BinarySha256=(Get-FileHash (Join-Path $cli 'AgentOS.Core.dll') -Algorithm SHA256).Hash;AppBinarySha256=(Get-FileHash (Join-Path $app 'AgentOS.Core.dll') -Algorithm SHA256).Hash}
+$protocol=@{Protocol=1;StateSchema=3;SourceSha256=(Get-FileHash (Join-Path $repo 'src/AgentOS.Core/RuntimeUpdate.cs') -Algorithm SHA256).Hash;BinarySha256=(Get-FileHash (Join-Path $cli 'AgentOS.Core.dll') -Algorithm SHA256).Hash;AppBinarySha256=(Get-FileHash (Join-Path $app 'AgentOS.Core.dll') -Algorithm SHA256).Hash}
 $protocol|ConvertTo-Json|Set-Content (Join-Path $app 'update-protocol.json') -Encoding utf8
 $manifest=Get-Content (Join-Path $repo 'packaging/AppxManifest.xml.in') -Raw
 $manifest=$manifest.Replace('{{PUBLISHER}}',[Security.SecurityElement]::Escape($Publisher)).Replace('{{VERSION}}',$Version)
@@ -85,7 +85,7 @@ if(!$UnsignedDiagnostic){
  if($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Thumbprint -ne $cert.Thumbprint){throw 'Signed MSIX verification failed.'}
 }
 $hash=(Get-FileHash $package -Algorithm SHA256).Hash
-@{Schema=1;Protocol=1;StateSchema=2;SourceSha256=$protocol.SourceSha256;BinarySha256=$protocol.BinarySha256;AppBinarySha256=$protocol.AppBinarySha256;IdentityName='AgentOS.Desktop';Publisher=$Publisher;Version=$Version;Package=(Split-Path $package -Leaf);Sha256=$hash;SignerThumbprint=$(if($cert){$cert.Thumbprint}else{''});Diagnostic=[bool]$UnsignedDiagnostic} |
+@{Schema=1;Protocol=1;StateSchema=3;SourceSha256=$protocol.SourceSha256;BinarySha256=$protocol.BinarySha256;AppBinarySha256=$protocol.AppBinarySha256;IdentityName='AgentOS.Desktop';Publisher=$Publisher;Version=$Version;Package=(Split-Path $package -Leaf);Sha256=$hash;SignerThumbprint=$(if($cert){$cert.Thumbprint}else{''});Diagnostic=[bool]$UnsignedDiagnostic} |
  ConvertTo-Json | Set-Content (Join-Path $out 'package-manifest.json') -Encoding utf8
 Write-Output $package
 

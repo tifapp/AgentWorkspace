@@ -247,39 +247,42 @@ internal static class HyperVCredential
  }
 }
 public sealed record SdkGuestRequest(string Script,string PrivateWorkspace,IReadOnlyList<string> Artifacts,int TimeoutSeconds=300);
-public sealed record SdkGuestResult(WindowsVmState State,int? ExitCode,string Detail,string Stdout="",string Stderr="",string ReceiptSha256="",string EnvironmentFingerprint="",bool ShutdownConfirmed=false);
-internal sealed record SdkManifest(string VmName,string Disk,string Base,string BaseHash,string Nonce,string Creator,string Script,int TimeoutSeconds,SdkFile[] Files,string[] Artifacts,string Result,string Confirmed,string EnvironmentFingerprint);
+public sealed record SdkGuestResult(WindowsVmState State,int? ExitCode,string Detail,string Stdout="",string Stderr="",string ReceiptSha256="",string EnvironmentFingerprint="",bool ShutdownConfirmed=false,bool TrustedCollector=false,string InputSha256="",string PostSourceSha256="",string CommandSha256="",string ProfileSha256="",string OwnerReceiptSha256="",string EffectSha256="",string OperationId="");
+internal sealed record SdkManifest(string VmName,string Disk,string Base,string BaseHash,string Nonce,string Creator,string Script,int TimeoutSeconds,SdkFile[] Files,string[] Artifacts,string Result,string Confirmed,string EnvironmentFingerprint,string InputSha256,string CommandSha256,string ProfileSha256,string CollectorVersion,string[] InputPaths);
 internal sealed record SdkFile(string Source,string Target);
 public sealed class HyperVSdkRunner(HyperVProfile profile)
 {
  internal static string SafeRelative(string path)
  {
-  if(string.IsNullOrWhiteSpace(path)||Path.IsPathRooted(path)||path.Contains('\\')||path.Split('/').Any(x=>x is "" or "." or ".."||x.Equals(".git",StringComparison.OrdinalIgnoreCase)||x.StartsWith(".agentos-sdk-",StringComparison.OrdinalIgnoreCase)||!System.Text.RegularExpressions.Regex.IsMatch(x,"^[A-Za-z0-9._-]+$")||System.Text.RegularExpressions.Regex.IsMatch(x.Split('.')[0],"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$",System.Text.RegularExpressions.RegexOptions.IgnoreCase)||x.EndsWith('.'))||path.Length>240)throw new ArgumentException("Checked relative artifact path required.");
+  if(string.IsNullOrWhiteSpace(path)||Path.IsPathRooted(path)||path.Contains('\\')||path.Split('/').Any(x=>x is "" or "." or ".."||x.StartsWith('.')||x.Equals("auth.json",StringComparison.OrdinalIgnoreCase)||x.Equals("config.toml",StringComparison.OrdinalIgnoreCase)||!System.Text.RegularExpressions.Regex.IsMatch(x,"^[A-Za-z0-9._-]+$")||System.Text.RegularExpressions.Regex.IsMatch(x.Split('.')[0],"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$",System.Text.RegularExpressions.RegexOptions.IgnoreCase)||x.EndsWith('.'))||path.Length>240)throw new ArgumentException("Checked relative artifact path required.");
   return path;
  }
  public async Task<SdkGuestResult> RunAsync(SdkGuestRequest request,CancellationToken ct=default)
  {
   var probe=HyperVExecution.Probe(profile with{DestinationCredentialTarget=null},false);if(!probe.Available)return new(WindowsVmState.Unavailable,null,probe.Reason);
   if(request.Script.Length is <1 or >8192||request.TimeoutSeconds is <1 or >3600||request.Artifacts.Count>128)throw new ArgumentException("SDK manifest exceeds bounds.");
-  var root=ResourceAdmission.Canonical(request.PrivateWorkspace,true);WindowsVmExecution.ValidateTree(root);
+  var root=ResourceAdmission.Canonical(request.PrivateWorkspace,true);WindowsVmExecution.ValidateTree(root);var ownerDirectory=Directory.GetParent(root)?.FullName??throw new IOException("SDK owner directory missing.");if(!string.Equals(Directory.GetParent(ownerDirectory)?.Name,"sdk-runs",StringComparison.OrdinalIgnoreCase))throw new UnauthorizedAccessException("SDK stage must belong to host-only owner root.");WorkExecution.VerifyOwnerDirectory(ownerDirectory);
   var paths=request.Artifacts.Select(SafeRelative).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
   var files=Directory.EnumerateFiles(root,"*",SearchOption.AllDirectories).Select(x=>(Absolute:x,Relative:Path.GetRelativePath(root,x).Replace('\\','/'))).Where(x=>!x.Relative.Split('/').Contains(".git",StringComparer.OrdinalIgnoreCase)).ToArray();
   if(files.Length>4096||files.Sum(x=>new FileInfo(x.Absolute).Length)>16*1024*1024)throw new ArgumentException("SDK workspace exceeds copy bounds.");
-  var work=Path.Combine(root,".agentos-sdk-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(work);
+  var sidecars=Path.Combine(root,".git","agent-os-temp");Directory.CreateDirectory(sidecars);var work=Path.Combine(sidecars,Guid.NewGuid().ToString("N"));Directory.CreateDirectory(work);
   var nonce=Guid.NewGuid().ToString("N");
+  var inputPaths=WorkExecution.InputManifest(root).ToArray();var inputHash=WorkExecution.SourceHash(root,inputPaths);
   var copied=new List<SdkFile>();var evidence=new List<string>();
   foreach(var f in files)
   {
-   var relative=SafeRelative(f.Relative);var staged=Path.Combine(work,"inputs",relative.Replace('/',Path.DirectorySeparatorChar));
+   var relative=f.Relative;if(relative.Split('/').Any(x=>x is "" or "." or ".."||x.Equals(".git",StringComparison.OrdinalIgnoreCase)))throw new IOException("SDK input path unsafe.");var staged=Path.Combine(work,"inputs",relative.Replace('/',Path.DirectorySeparatorChar));
    Directory.CreateDirectory(Path.GetDirectoryName(staged)!);File.Copy(f.Absolute,staged);
    copied.Add(new SdkFile(staged,"C:\\AgentOS\\workspace\\"+relative.Replace('/','\\')));
    evidence.Add(relative+":"+StateStore.HashFile(staged));
   }
-  var manifest=new SdkManifest("AgentOS-SDK-"+nonce,Path.Combine(work,"child.vhdx"),profile.BaseVhdPath,profile.BaseVhdSha256,nonce,Environment.MachineName+"\\"+Environment.UserName,request.Script,request.TimeoutSeconds,copied.ToArray(),paths,Path.Combine(work,"result.json"),Path.Combine(work,"shutdown-confirmed"),HyperVExecution.H(profile.BaseVhdSha256+"\n"+request.Script+"\n"+string.Join("\n",evidence)));
+  var manifest=new SdkManifest("AgentOS-SDK-"+nonce,Path.Combine(work,"child.vhdx"),profile.BaseVhdPath,profile.BaseVhdSha256,nonce,Environment.MachineName+"\\"+Environment.UserName,request.Script,request.TimeoutSeconds,copied.ToArray(),paths,Path.Combine(work,"result.json"),Path.Combine(work,"shutdown-confirmed"),HyperVExecution.H(profile.BaseVhdSha256+"\n"+request.Script+"\n"+string.Join("\n",evidence)),inputHash,WorkExecution.Hash(request.Script),WorkExecution.Hash(JsonSerializer.Serialize(profile)),"agentos-sdk-collector-v2",inputPaths);
   var data=Path.Combine(work,"manifest.json");HyperVExecution.Save(data,manifest);HyperVExecution.Save(Path.Combine(work,"owner.json"),new{VmId=Guid.Empty,Nonce=nonce,Name=manifest.VmName,Disk=manifest.Disk,Creator=manifest.Creator});
   var psi=new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),"WindowsPowerShell","v1.0","powershell.exe")){UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true};
   psi.ArgumentList.Add("-NoProfile");psi.ArgumentList.Add("-NonInteractive");psi.ArgumentList.Add("-EncodedCommand");psi.ArgumentList.Add(Convert.ToBase64String(Encoding.Unicode.GetBytes(Helper)));
   if(!HyperVCredential.Read(profile.GuestCredentialTarget,out var user,out var secret))return new(WindowsVmState.Unavailable,null,"Guest credential unavailable.");
+  if(string.IsNullOrWhiteSpace(profile.WorkerCredentialTarget)||!HyperVCredential.Read(profile.WorkerCredentialTarget,out var workerUser,out var workerSecret)||workerUser.Equals(user,StringComparison.OrdinalIgnoreCase))return new(WindowsVmState.Unavailable,null,"Separate SDK worker credential unavailable.");
+  psi.Environment["AGENTOS_WORKER_USER"]=workerUser;psi.Environment["AGENTOS_WORKER_SECRET"]=workerSecret;
   psi.Environment["AGENTOS_SDK_MANIFEST"]=data;psi.Environment["AGENTOS_GUEST_USER"]=user;psi.Environment["AGENTOS_GUEST_SECRET"]=secret;
   using var process=Process.Start(psi)??throw new IOException("SDK VM helper did not start.");
   using var timeout=CancellationTokenSource.CreateLinkedTokenSource(ct);timeout.CancelAfter(TimeSpan.FromSeconds(request.TimeoutSeconds+180));
@@ -290,7 +293,9 @@ public sealed class HyperVSdkRunner(HyperVProfile profile)
   if(value.GetProperty("Nonce").GetString()!=nonce||value.GetProperty("EnvironmentFingerprint").GetString()!=manifest.EnvironmentFingerprint)return new(WindowsVmState.Unknown,null,"SDK receipt identity mismatch.");
   var output=value.GetProperty("Stdout").GetString()??"";var error=value.GetProperty("Stderr").GetString()??"";
   if(output.Length>8192||error.Length>8192)return new(WindowsVmState.Unknown,null,"SDK output exceeds bound.");
-  var artifacts=value.GetProperty("Artifacts");long total=0;
+  if(value.GetProperty("InputSha256").GetString()!=inputHash||value.GetProperty("CommandSha256").GetString()!=manifest.CommandSha256||value.GetProperty("ProfileSha256").GetString()!=manifest.ProfileSha256)return new(WindowsVmState.Unknown,null,"SDK collector proof mismatch.");
+  if(value.GetProperty("PostSourceSha256").GetString() is not {Length:64}||value.GetProperty("GuestEnvironmentSha256").GetString() is not {Length:64})return new(WindowsVmState.Unknown,null,"SDK guest proof incomplete.");
+  WindowsVmExecution.ValidateTree(work);using var ownerDocument=JsonDocument.Parse(File.ReadAllText(Path.Combine(work,"owner.json")));var vmId=ownerDocument.RootElement.GetProperty("VmId").GetGuid();if(vmId==Guid.Empty)return new(WindowsVmState.Unknown,null,"SDK VM identity unproven.");  var artifacts=value.GetProperty("Artifacts");long total=0;
   foreach(var item in artifacts.EnumerateObject())
   {
    var relative=SafeRelative(item.Name);if(!paths.Contains(relative,StringComparer.OrdinalIgnoreCase))throw new InvalidDataException("Unrequested artifact.");
@@ -302,8 +307,8 @@ public sealed class HyperVSdkRunner(HyperVProfile profile)
    Directory.CreateDirectory(Path.GetDirectoryName(destination)!);var temp=destination+".agentos-"+Guid.NewGuid().ToString("N")+".tmp";try{await File.WriteAllBytesAsync(temp,bytes,ct);File.Move(temp,destination,true);}finally{if(File.Exists(temp))File.Delete(temp);}
   }
   var code=value.GetProperty("ExitCode").GetInt32();var hash=Convert.ToHexString(SHA256.HashData(resultBytes));
-  WindowsVmExecution.ValidateTree(work);Directory.Delete(work,true);
-  return new(code==0?WindowsVmState.Completed:WindowsVmState.Failed,code,"SDK guest receipt confirmed.",output,error,hash,manifest.EnvironmentFingerprint,true);
+  var ownerHash=WorkExecution.Hash(nonce+"\n"+manifest.VmName+"\n"+vmId.ToString("D")+"\n"+manifest.Disk+"\n"+hash);
+  return new(code==0?WindowsVmState.Completed:WindowsVmState.Failed,code,"SDK guest receipt confirmed.",output,error,hash,value.GetProperty("GuestEnvironmentSha256").GetString()??"",true,true,inputHash,value.GetProperty("PostSourceSha256").GetString()??"",manifest.CommandSha256,manifest.ProfileSha256,ownerHash,WorkExecution.Hash(artifacts.GetRawText()));
  }
  public async Task<SdkGuestResult> RecoverOwnedAsync(string ownedWorkDirectory,CancellationToken ct=default)
  {
@@ -311,7 +316,8 @@ public sealed class HyperVSdkRunner(HyperVProfile profile)
   var manifestPath=Path.Combine(dir,"manifest.json");var ownerPath=Path.Combine(dir,"owner.json");
   if(!File.Exists(manifestPath)||!File.Exists(ownerPath))return new(WindowsVmState.Unknown,null,"SDK ownership record unavailable.");
   SdkManifest? m;try{m=JsonSerializer.Deserialize<SdkManifest>(File.ReadAllText(manifestPath));}catch{return new(WindowsVmState.Unknown,null,"SDK manifest invalid.");}
-  if(m==null||Path.GetDirectoryName(m.Result)!=dir||m.Disk!=Path.Combine(dir,"child.vhdx")||m.Confirmed!=Path.Combine(dir,"shutdown-confirmed")||m.Creator!=Environment.MachineName+"\\"+Environment.UserName)return new(WindowsVmState.Unknown,null,"SDK ownership identity changed.");
+  if(m?.CollectorVersion!="agentos-sdk-collector-v2")return new(WindowsVmState.Unknown,null,"SDK collector version unavailable.");
+  if(m==null||m.Base!=profile.BaseVhdPath||m.BaseHash!=profile.BaseVhdSha256||Path.GetDirectoryName(m.Result)!=dir||m.Disk!=Path.Combine(dir,"child.vhdx")||m.Confirmed!=Path.Combine(dir,"shutdown-confirmed")||m.Creator!=Environment.MachineName+"\\"+Environment.UserName||m.InputSha256!=WorkExecution.SourceHash(Directory.GetParent(Directory.GetParent(Directory.GetParent(dir)!.FullName)!.FullName)!.FullName,m.InputPaths))return new(WindowsVmState.Unknown,null,"SDK ownership identity changed.");
   if(!HyperVExecution.Probe(profile with{DestinationCredentialTarget=null},false).Available)return new(WindowsVmState.Unavailable,null,"Hyper-V prerequisites unavailable.");
   var psi=new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),"WindowsPowerShell","v1.0","powershell.exe")){UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true};
   psi.ArgumentList.Add("-NoProfile");psi.ArgumentList.Add("-NonInteractive");psi.ArgumentList.Add("-EncodedCommand");psi.ArgumentList.Add(Convert.ToBase64String(Encoding.Unicode.GetBytes(RecoveryHelper)));
@@ -323,13 +329,18 @@ public sealed class HyperVSdkRunner(HyperVProfile profile)
   if(process.ExitCode!=0||!File.Exists(m.Confirmed)||File.ReadAllText(m.Confirmed).Trim()!=m.Nonce||!File.Exists(m.Result))return new(WindowsVmState.Unknown,null,"SDK VM shutdown or receipt unconfirmed; ownership retained at "+dir);
   if(new FileInfo(m.Result).Length>2_000_000)return new(WindowsVmState.Unknown,null,"SDK receipt exceeds bound.");
   var bytes=await File.ReadAllBytesAsync(m.Result,ct);
-  try{using var doc=JsonDocument.Parse(bytes);var r=doc.RootElement;
-   if(r.GetProperty("Nonce").GetString()!=m.Nonce||r.GetProperty("EnvironmentFingerprint").GetString()!=m.EnvironmentFingerprint)return new(WindowsVmState.Unknown,null,"SDK receipt identity mismatch.");
-   var output=r.GetProperty("Stdout").GetString()??"";var error=r.GetProperty("Stderr").GetString()??"";
-   if(output.Length>8192||error.Length>8192)return new(WindowsVmState.Unknown,null,"SDK output exceeds bound.");
-   return new(WindowsVmState.Unknown,r.GetProperty("ExitCode").GetInt32(),"SDK VM shutdown confirmed; recover artifacts from retained receipt.",output,error,Convert.ToHexString(SHA256.HashData(bytes)),m.EnvironmentFingerprint,true);
-  }catch{return new(WindowsVmState.Unknown,null,"SDK receipt invalid.");}
- }
+  try
+  {
+   using var doc=JsonDocument.Parse(bytes);var r=doc.RootElement;
+   if(r.GetProperty("Nonce").GetString()!=m.Nonce||r.GetProperty("EnvironmentFingerprint").GetString()!=m.EnvironmentFingerprint||r.GetProperty("InputSha256").GetString()!=m.InputSha256||r.GetProperty("CommandSha256").GetString()!=m.CommandSha256||r.GetProperty("ProfileSha256").GetString()!=m.ProfileSha256)return new(WindowsVmState.Unknown,null,"SDK recovered receipt proof mismatch.");
+   var output=r.GetProperty("Stdout").GetString()??"";var error=r.GetProperty("Stderr").GetString()??"";if(output.Length>8192||error.Length>8192)return new(WindowsVmState.Unknown,null,"SDK output exceeds bound.");
+   var artifacts=r.GetProperty("Artifacts");long total=0;foreach(var item in artifacts.EnumerateObject()){var name=SafeRelative(item.Name);if(!m.Artifacts.Contains(name,StringComparer.OrdinalIgnoreCase))return new(WindowsVmState.Unknown,null,"Unrequested recovered artifact.");total+=Convert.FromBase64String(item.Value.GetString()??"").Length;if(total>1_000_000)return new(WindowsVmState.Unknown,null,"Recovered artifact bound exceeded.");}
+   var guestEnvironment=r.GetProperty("GuestEnvironmentSha256").GetString()??"";if(guestEnvironment.Length!=64||r.GetProperty("PostSourceSha256").GetString() is not {Length:64} post)return new(WindowsVmState.Unknown,null,"SDK guest proof incomplete.");
+   var hash=Convert.ToHexString(SHA256.HashData(bytes));using var ownerDocument=JsonDocument.Parse(File.ReadAllText(ownerPath));var vmId=ownerDocument.RootElement.GetProperty("VmId").GetGuid();if(vmId==Guid.Empty)return new(WindowsVmState.Unknown,null,"SDK VM identity unproven.");
+   var ownerHash=WorkExecution.Hash(m.Nonce+"\n"+m.VmName+"\n"+vmId.ToString("D")+"\n"+m.Disk+"\n"+hash);var code=r.GetProperty("ExitCode").GetInt32();
+   return new(code==0?WindowsVmState.Completed:WindowsVmState.Failed,code,"Recovered exact SDK VM shutdown and protected collector receipt.",output,error,hash,guestEnvironment,true,true,m.InputSha256,post,m.CommandSha256,m.ProfileSha256,ownerHash,WorkExecution.Hash(artifacts.GetRawText()));
+  }
+  catch{return new(WindowsVmState.Unknown,null,"SDK recovered receipt invalid.");} }
  internal const string RecoveryHelper=@"$ErrorActionPreference='Stop'
 Import-Module Hyper-V -ErrorAction Stop
 $m=Get-Content -LiteralPath $env:AGENTOS_SDK_MANIFEST -Raw | ConvertFrom-Json
@@ -384,17 +395,32 @@ $ready=(Get-Date).AddMinutes(2);$connected=$false
 while((Get-Date) -lt $ready){try{$connected=(Invoke-Command -VMId $vm.Id -Credential $guest -ScriptBlock {'ready'} -ErrorAction Stop) -eq 'ready';if($connected){break}}catch{} Start-Sleep -Seconds 2}
 if(!$connected){throw 'PowerShell Direct guest unavailable'}
 foreach($f in $m.Files){Copy-VMFile -VMName $vm.Name -SourcePath $f.Source -DestinationPath $f.Target -FileSource Host -CreateFullPath}
-$spec=@{Nonce=$m.Nonce;Script=$m.Script;Artifacts=@($m.Artifacts);TimeoutSeconds=$m.TimeoutSeconds;EnvironmentFingerprint=$m.EnvironmentFingerprint} | ConvertTo-Json -Compress -Depth 5
+$spec=@{Nonce=$m.Nonce;Script=$m.Script;Artifacts=@($m.Artifacts);TimeoutSeconds=$m.TimeoutSeconds;EnvironmentFingerprint=$m.EnvironmentFingerprint;InputSha256=$m.InputSha256;CommandSha256=$m.CommandSha256;ProfileSha256=$m.ProfileSha256;InputPaths=@($m.InputPaths);WorkerUser=$env:AGENTOS_WORKER_USER;WorkerSecret=$env:AGENTOS_WORKER_SECRET} | ConvertTo-Json -Compress -Depth 6
 $r=Invoke-Command -VMId $vm.Id -Credential $guest -ScriptBlock {
  param($json)
  $s=$json | ConvertFrom-Json
- $root='C:\AgentOS\workspace';New-Item -ItemType Directory -Force -Path $root | Out-Null
+ $root='C:\AgentOS\workspace';New-Item -ItemType Directory -Force -Path $root | Out-Null $worker=New-Object System.Management.Automation.PSCredential($s.WorkerUser,(ConvertTo-SecureString $s.WorkerSecret -AsPlainText -Force))
+ $base='C:\AgentOS';$receiptPath=Join-Path $base 'sdk-receipt.json';[IO.File]::WriteAllText($receiptPath,'')
+ icacls $base /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null;if($LASTEXITCODE -ne 0){throw 'SDK ACL setup failed'}
+ icacls $base /grant:r "$($s.WorkerUser):RX" | Out-Null;if($LASTEXITCODE -ne 0){throw 'SDK ACL setup failed'}
+ icacls $receiptPath /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' | Out-Null;if($LASTEXITCODE -ne 0){throw 'SDK ACL setup failed'}
+ icacls $root /grant:r "$($s.WorkerUser):(OI)(CI)M" | Out-Null;if($LASTEXITCODE -ne 0){throw 'SDK worker ACL failed'}
+ $check=Start-Job -Credential $worker -ScriptBlock {$identity=[Security.Principal.WindowsIdentity]::GetCurrent();$principal=New-Object Security.Principal.WindowsPrincipal($identity);$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) -or @($identity.Groups | Where-Object {$_.Value -eq 'S-1-5-32-544'}).Count -gt 0}
+ if(!(Wait-Job $check -Timeout 15)){Stop-Job $check;throw 'SDK worker identity check timed out'}
+ $workerIsAdmin=Receive-Job $check;Remove-Job $check -Force;if($workerIsAdmin -ne $false){throw 'SDK worker must be nonadministrator'}
+ function TextHash($text){$sha=[Security.Cryptography.SHA256]::Create();try{return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)))).Replace('-','')}finally{$sha.Dispose()}}
+ function SourceHash($path,$names){
+  $lines=@();foreach($name in $names){if($name -match '(^|/)(\.|\.\.)($|/)' -or $name -match '(^|/)\.git($|/)'){throw 'SDK input path invalid'};$file=Join-Path $path ($name.Replace('/','\'));if(!(Test-Path -LiteralPath $file -PathType Leaf)){throw 'SDK input missing'};$cursor=$file;while($cursor.StartsWith($path,[StringComparison]::OrdinalIgnoreCase)){if((Get-Item -LiteralPath $cursor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'SDK input link'};if($cursor -eq $path){break};$cursor=Split-Path $cursor};$lines+=($name+':'+(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash)}
+  [Array]::Sort($lines,[StringComparer]::Ordinal);return TextHash ($lines -join "`n")
+ }
+ $input=SourceHash $root @($s.InputPaths);if($input -ne $s.InputSha256){throw 'SDK input fingerprint mismatch'}
  $output='';$errorText='';$code=1
  try{
-  $job=Start-Job -ScriptBlock {param($script,$root) $ErrorActionPreference='Stop';Set-Location -LiteralPath $root;try{$text=(& ([scriptblock]::Create($script)) *>&1 | Out-String);return @{Code=$(if($LASTEXITCODE){$LASTEXITCODE}else{0});Output=$text;Error=''}}catch{return @{Code=1;Output='';Error=$_.Exception.GetType().Name}}} -ArgumentList $s.Script,$root
-  if(!(Wait-Job $job -Timeout ([int]$s.TimeoutSeconds))){Stop-Job $job;$code=124;$errorText='Guest script timed out'}else{$jr=Receive-Job $job;$output=[string]$jr.Output;$errorText=[string]$jr.Error;$code=[int]$jr.Code}
+  $job=Start-Job -Credential $worker -ScriptBlock {param($script,$root) $ErrorActionPreference='Stop';Set-Location -LiteralPath $root;try{$text=(& ([scriptblock]::Create($script)) *>&1 | Out-String);return @{Code=$(if($LASTEXITCODE){$LASTEXITCODE}else{0});Output=$text;Error=''}}catch{return @{Code=1;Output='';Error=$_.Exception.GetType().Name}}} -ArgumentList $s.Script,$root
+  if(!(Wait-Job $job -Timeout ([int]$s.TimeoutSeconds))){Stop-Job $job;$code=124;$errorText='Guest script timed out'}else{$results=@(Receive-Job $job -ErrorAction Stop);if($job.State -ne 'Completed' -or $results.Count -ne 1 -or $null -eq $results[0].Code){$code=125;$errorText='SDK worker result missing'}else{$jr=$results[0];$output=[string]$jr.Output;$errorText=[string]$jr.Error;$code=[int]$jr.Code}}
   Remove-Job $job -Force
  }catch{$code=1;$errorText=$_.Exception.GetType().Name}
+ $post=SourceHash $root @($s.InputPaths)
  $items=@{};$total=0
  foreach($relative in $s.Artifacts){
   $path=Join-Path $root $relative
@@ -405,7 +431,7 @@ $r=Invoke-Command -VMId $vm.Id -Credential $guest -ScriptBlock {
   }
   if(Test-Path -LiteralPath $path -PathType Leaf){$bytes=[IO.File]::ReadAllBytes($path);$total+=$bytes.Length;if($total -gt 1000000){throw 'Artifact bound exceeded'};$items[$relative]=[Convert]::ToBase64String($bytes)}
  }
- $receipt=@{Nonce=$s.Nonce;EnvironmentFingerprint=$s.EnvironmentFingerprint;ExitCode=$code;Stdout=$output.Substring(0,[Math]::Min(8192,$output.Length));Stderr=$errorText.Substring(0,[Math]::Min(8192,$errorText.Length));Artifacts=$items}
+  $receipt=@{Nonce=$s.Nonce;EnvironmentFingerprint=$s.EnvironmentFingerprint;InputSha256=$input;PostSourceSha256=$post;CommandSha256=$s.CommandSha256;ProfileSha256=$s.ProfileSha256;GuestEnvironmentSha256=(TextHash ([Environment]::OSVersion.VersionString+';'+$PSVersionTable.PSVersion.ToString()+';'+[Environment]::Version.ToString()));ExitCode=$code;Stdout=$output.Substring(0,[Math]::Min(8192,$output.Length));Stderr=$errorText.Substring(0,[Math]::Min(8192,$errorText.Length));Artifacts=$items}
  $receipt | ConvertTo-Json -Compress -Depth 5 | Set-Content -LiteralPath 'C:\AgentOS\sdk-receipt.json'
  return $receipt
 } -ArgumentList $spec

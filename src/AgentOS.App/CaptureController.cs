@@ -118,7 +118,7 @@ public sealed class CaptureController : IDisposable
         var result = fromGlobalHotkey ? _tracker.CaptureLastExternal() : await CaptureRetainedExternalAsync();
         _window.AppWindow.Show();
         _window.Activate();
-        var dialog = new CaptureDialog(result, SaveAsync, StartAsync, _closing.Token);
+        var dialog = new CaptureDialog(result, SaveAsync, StartAsync, SaveContextAsync, _closing.Token);
         _dialog = dialog;
         try { await dialog.ShowAsync(_window.Content.XamlRoot, _hotkey.Status); }
         finally { if (ReferenceEquals(_dialog, dialog)) _dialog = null; dialog.Dispose(); }
@@ -144,6 +144,15 @@ public sealed class CaptureController : IDisposable
     private static extern bool SetForegroundWindow(nint hwnd);
     [DllImport("user32.dll")]
     private static extern nint GetForegroundWindow();
+    private async Task<ContextArtifactRef> SaveContextAsync(string project, ContextArtifactKind kind, byte[] bytes, string source, DateTimeOffset capturedAt, CancellationToken cancel)
+    {
+        if (!_ownedRuntimes.ContainsKey(project))
+        {
+            try { _ownedRuntimes[project] = await ProjectRuntime.OpenAsync(project); }
+            catch (IOException) { /* An existing runtime may own this project; its broker is the authority. */ }
+        }
+        return await ProjectClient.SaveContextAsync(project, kind, bytes, source, capturedAt, cancel);
+    }
     private async Task<TaskMap> SaveAsync(TaskMap draft, CancellationToken cancel)
     {
         var project = draft.ProjectPath;
@@ -165,7 +174,7 @@ public sealed class CaptureController : IDisposable
     }
 
     private async Task<IReadOnlyList<string>> StartAsync(TaskMap map, CancellationToken cancel)
-        => await ProjectClient.StartMapAsync(map.ProjectPath, map.Id, cancel)
+        => await ProjectClient.StartMapAsync(map.ProjectPath, map.Id, map.Tasks.Where(t => t.Selected && t.WorkId == null && TaskMapRules.DependenciesComplete(map, t)).Select(t => t.Id).ToArray(), map.Revision, cancel)
            ?? throw new IOException("The project broker is busy. No task start was confirmed.");
 
     public void Dispose()

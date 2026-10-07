@@ -22,7 +22,7 @@ if(!(Test-Path $projectPath -PathType Container)){Unavailable 'project missing'}
 if(!(Test-Path $cli -PathType Leaf)){Unavailable 'packaged CLI missing'}
 if(!(Test-Path $pkg -PathType Leaf)){Reject 'signed package missing'}
 $spec=Get-Content $manifest -Raw|ConvertFrom-Json;$sha=(Get-FileHash $pkg -Algorithm SHA256).Hash
-if($spec.Schema -ne 1 -or $spec.Protocol -ne 1 -or $spec.StateSchema -ne 2 -or $spec.Diagnostic -or $spec.Package -ne [IO.Path]::GetFileName($pkg) -or $sha -ne $spec.Sha256 -or $spec.SignerThumbprint -ne $thumb -or $spec.SourceSha256 -notmatch '^[A-F0-9]{64}$' -or $spec.BinarySha256 -notmatch '^[A-F0-9]{64}$' -or $spec.AppBinarySha256 -notmatch '^[A-F0-9]{64}$'){Reject 'manifest, hash, or signer mismatch'}
+if($spec.Schema -ne 1 -or $spec.Protocol -ne 1 -or $spec.StateSchema -ne 3 -or $spec.Diagnostic -or $spec.Package -ne [IO.Path]::GetFileName($pkg) -or $sha -ne $spec.Sha256 -or $spec.SignerThumbprint -ne $thumb -or $spec.SourceSha256 -notmatch '^[A-F0-9]{64}$' -or $spec.BinarySha256 -notmatch '^[A-F0-9]{64}$' -or $spec.AppBinarySha256 -notmatch '^[A-F0-9]{64}$'){Reject 'manifest, hash, or signer mismatch'}
 Signed $pkg $thumb;$id=Identity $pkg;Certificate $pkg $id.Publisher $thumb
 $archive=[IO.Compression.ZipFile]::OpenRead($pkg);try{
  $entry=$archive.GetEntry('update-protocol.json');if(!$entry -or $entry.Length -gt 65536){Reject 'signed protocol metadata missing or too large'};$reader=[IO.StreamReader]::new($entry.Open());try{$embedded=$reader.ReadToEnd()|ConvertFrom-Json}finally{$reader.Dispose()}
@@ -48,7 +48,7 @@ $expectedCli=Join-Path $priorApp.InstallLocation 'cli/AgentOS.Cli.exe'
 if([IO.Path]::GetFullPath($cli) -ne [IO.Path]::GetFullPath($expectedCli)){Reject 'CLI outside target installed package'}
 $oldCore=Join-Path $priorApp.InstallLocation 'AgentOS.Core.dll';if(!(Test-Path $oldCore -PathType Leaf)){Unavailable 'installed owning runtime assembly missing'}
 $health=& $cli update-health $projectPath|ConvertFrom-Json
-if($LASTEXITCODE -ne 0 -or $health.AssemblySha256 -ne (Get-FileHash $oldCore -Algorithm SHA256).Hash -or $health.Version -ne 1 -or $health.StateSchema -ne 2 -or (@('scoped-drain','cooperative-exit','schema2','signed-msix-handshake')|Where-Object {$_ -notin $health.Capabilities}).Count -ne 0){Unavailable 'owning runtime protocol unavailable or incompatible'}
+if($LASTEXITCODE -ne 0 -or $health.AssemblySha256 -ne (Get-FileHash $oldCore -Algorithm SHA256).Hash -or $health.Version -ne 1 -or $health.StateSchema -ne 3 -or (@('scoped-drain','cooperative-exit','schema3','signed-msix-handshake')|Where-Object {$_ -notin $health.Capabilities}).Count -ne 0){Unavailable 'owning runtime protocol unavailable or incompatible'}
 $dir=Join-Path $root 'update-state';PlainPath $dir;New-Item -ItemType Directory -Path $dir -Force|Out-Null
 $pendingPath=Join-Path $dir 'pending.json';PlainFile $pendingPath;$previous=$null
 if(Test-Path $pendingPath -PathType Leaf){$previous=Get-Content $pendingPath -Raw|ConvertFrom-Json;if($previous.Status -in @('Installing','RecoveryRequired')){Unavailable 'prior update needs explicit recovery'}}
@@ -86,15 +86,15 @@ try{
  if(!(Test-Path $nextCli -PathType Leaf) -or !(Test-Path $core -PathType Leaf) -or !(Test-Path $appCore -PathType Leaf)){throw 'new packaged runtime assembly or CLI missing'}
  $hash=(Get-FileHash $core -Algorithm SHA256).Hash
  if($hash -ne $spec.BinarySha256 -or (Get-FileHash $appCore -Algorithm SHA256).Hash -ne $spec.AppBinarySha256){throw 'installed runtime binary differs from signed package manifest'}
- $handshake=& $nextCli update-handshake 1 2 $hash|ConvertFrom-Json
- if($LASTEXITCODE -ne 0 -or $handshake.Version -ne 1 -or $handshake.StateSchema -gt 2 -or $handshake.AssemblySha256 -ne $hash -or (@('scoped-drain','cooperative-exit','schema2','signed-msix-handshake')|Where-Object {$_ -notin $handshake.Capabilities}).Count -ne 0){throw 'new CLI protocol, schema, assembly hash or capability handshake failed'}
+ $handshake=& $nextCli update-handshake 1 3 $hash|ConvertFrom-Json
+ if($LASTEXITCODE -ne 0 -or $handshake.Version -ne 1 -or $handshake.StateSchema -gt 3 -or $handshake.AssemblySha256 -ne $hash -or (@('scoped-drain','cooperative-exit','schema3','signed-msix-handshake')|Where-Object {$_ -notin $handshake.Capabilities}).Count -ne 0){throw 'new CLI protocol, schema, assembly hash or capability handshake failed'}
  if(((StateRefs $stateRoot) -join "`n") -ne ($refs -join "`n")){throw 'project state changed during installation'}
  SaveJson $current @{Schema=1;PackageFile=$candidate;Sha256=$sha;Version=$id.Version;IdentityName=$id.Name;Publisher=$id.Publisher;SignerThumbprint=$thumb;InstallLocation=$app.InstallLocation;PackageFamilyName=$app.PackageFamilyName}
  $lockLease.Dispose();$lockLease=$null
  & $nextCli update-restart $projectPath (Split-Path $stateRoot -Parent)|Out-Null;if($LASTEXITCODE -ne 0){throw 'new packaged runtime restart failed'}
  $newHealth=$null
  for($n=0;$n -lt 30;$n++){try{$newHealth=& $nextCli update-health $projectPath 2>$null|ConvertFrom-Json;if($LASTEXITCODE -eq 0 -and $newHealth){break}}catch{};Start-Sleep -Seconds 1}
- if(!$newHealth -or $newHealth.Version -ne 1 -or $newHealth.StateSchema -ne 2 -or $newHealth.AssemblySha256 -ne $spec.AppBinarySha256){throw 'new owning runtime health handshake failed'}
+ if(!$newHealth -or $newHealth.Version -ne 1 -or $newHealth.StateSchema -ne 3 -or $newHealth.AssemblySha256 -ne $spec.AppBinarySha256){throw 'new owning runtime health handshake failed'}
  $record.Status='Succeeded';$record.CompletedUtc=[DateTime]::UtcNow.ToString('o');SaveJson $pendingPath $record
  'Signed update installed and new CLI handshake confirmed.'
 }catch{

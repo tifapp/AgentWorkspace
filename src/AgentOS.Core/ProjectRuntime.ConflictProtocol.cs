@@ -106,6 +106,7 @@ public sealed partial class ProjectRuntime
     internal async Task<string?> AfterManagedTurnAsync(string workId, CancellationToken token)
     {
         var work = Find(workId);
+        if(work.SdkShutdownDebt||WorkExecution.HasUnknownOwnership(_store.Root,work.Id)){MarkSdkUnknown(work.Id);return null;}
         await Capture(work);
         var deferred = Snapshot.Conflicts.Where(x => x.WorkId == work.Id && !x.Resolved).ToArray();
         var unresolved = deferred.Where(x => !x.Abandoned).ToArray();

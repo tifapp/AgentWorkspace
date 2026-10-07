@@ -1,4 +1,4 @@
-﻿using System.IO.Compression;
+using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Xml;
@@ -10,8 +10,8 @@ public sealed record UpdateDrain(string Token,UpdateScope Scope,DateTimeOffset C
 public sealed record UpdateReadiness(bool Ready,string[] Blockers,long StateGeneration,RuntimeProtocol Protocol,string StatePath);
 public static class RuntimeUpdate
 {
- public const int Version=1,StateSchema=2;
- public static RuntimeProtocol Health()=>new(Version,StateSchema,StateStore.HashFile(typeof(ProjectRuntime).Assembly.Location),["scoped-drain","cooperative-exit","schema2","signed-msix-handshake"]);
+ public const int Version=1,StateSchema=3;
+ public static RuntimeProtocol Health()=>new(Version,StateSchema,StateStore.HashFile(typeof(ProjectRuntime).Assembly.Location),["scoped-drain","cooperative-exit","schema3","signed-msix-handshake"]);
  public static bool IsNewerVersion(string candidate,string installed)=>System.Version.TryParse(candidate,out var n)&&System.Version.TryParse(installed,out var o)&&n>o;
  public static bool CanRollback(long beforeGeneration,int beforeSchema,long currentGeneration,int currentSchema,bool refsUnchanged,bool stopped)=>refsUnchanged&&stopped&&beforeGeneration==currentGeneration&&currentSchema<=beforeSchema;
  public static void Validate(UpdateScope s)

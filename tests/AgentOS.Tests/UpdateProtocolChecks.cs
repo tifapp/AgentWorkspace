@@ -22,7 +22,7 @@ internal static class UpdateProtocolChecks
    using(var zip=ZipFile.Open(file,ZipArchiveMode.Create))
    {
     using(var writer=new StreamWriter(zip.CreateEntry("AppxManifest.xml").Open()))await writer.WriteAsync("<Package><Identity Name=\"AgentOS.Desktop\" Publisher=\"CN=Test\" Version=\"2.0.0.0\" ProcessorArchitecture=\"x64\" /></Package>");
-    using(var writer=new StreamWriter(zip.CreateEntry("update-protocol.json").Open()))await writer.WriteAsync(JsonSerializer.Serialize(new{Protocol=1,StateSchema=2,AppBinarySha256=hash,BinarySha256=hash}));
+    using(var writer=new StreamWriter(zip.CreateEntry("update-protocol.json").Open()))await writer.WriteAsync(JsonSerializer.Serialize(new{Protocol=1,StateSchema=3,AppBinarySha256=hash,BinarySha256=hash}));
     using(var stream=zip.CreateEntry("AgentOS.Core.dll").Open())await stream.WriteAsync(binary);
     using(var stream=zip.CreateEntry("cli/AgentOS.Core.dll").Open())await stream.WriteAsync(binary);
    }
@@ -31,8 +31,8 @@ internal static class UpdateProtocolChecks
   });  await test("Signed update version and rollback guards",()=>
   {
    if(!RuntimeUpdate.IsNewerVersion("2.0.0.0","1.9.9.9")||RuntimeUpdate.IsNewerVersion("1.0.0.0","1.0.0.0"))throw new Exception("Version ordering broken.");
-   var health=RuntimeUpdate.Health();if(health.Version!=1||health.StateSchema!=2||health.AssemblySha256!=StateStore.HashFile(typeof(ProjectRuntime).Assembly.Location)||!health.Capabilities.Contains("cooperative-exit"))throw new Exception("Handshake incomplete.");
-   if(!RuntimeUpdate.CanRollback(10,2,10,2,true,true)||RuntimeUpdate.CanRollback(10,2,11,2,true,true)||RuntimeUpdate.CanRollback(10,2,10,3,true,true)||RuntimeUpdate.CanRollback(10,2,10,2,false,true)||RuntimeUpdate.CanRollback(10,2,10,2,true,false))throw new Exception("Rollback guard broken.");
+   var health=RuntimeUpdate.Health();if(health.Version!=1||health.StateSchema!=3||health.AssemblySha256!=StateStore.HashFile(typeof(ProjectRuntime).Assembly.Location)||!health.Capabilities.Contains("cooperative-exit")||!health.Capabilities.Contains("schema3"))throw new Exception("Handshake incomplete.");
+   if(!RuntimeUpdate.CanRollback(10,3,10,3,true,true)||RuntimeUpdate.CanRollback(10,3,11,3,true,true)||RuntimeUpdate.CanRollback(10,3,10,4,true,true)||RuntimeUpdate.CanRollback(10,3,10,3,false,true)||RuntimeUpdate.CanRollback(10,3,10,3,true,false))throw new Exception("Rollback guard broken.");
    return Task.CompletedTask;
   });
   await test("Drain survives owner restart and refuses new work",async()=>
