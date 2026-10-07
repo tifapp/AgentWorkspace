@@ -165,6 +165,13 @@ public sealed partial class ProjectRuntime
  }
  private void UpdateMapStatuses()
  {
+  foreach(var map in _state.Maps)
+   foreach(var task in map.Tasks)
+   {
+    task.WorkIds ??=[];
+    var root=_state.Work.FirstOrDefault(w=>w.ExternalRequestId==task.Id);
+    if(task.WorkId==null&&root!=null)task.WorkId=root.Id;
+   }
   foreach(var work in _state.Work.Where(w=>w.Relationship==WorkRelationship.Unknown))work.Relationship=work.ParentId==null?WorkRelationship.Original:IsRevisionAttempt(work)?WorkRelationship.Revision:WorkRelationship.Followup;
   foreach(var work in _state.Work.Where(w=>w.Relationship==WorkRelationship.Followup))AddFollowupMapNode(work);
   var interactions=_interactions.Inspect();
@@ -172,9 +179,7 @@ public sealed partial class ProjectRuntime
   {
    foreach(var task in map.Tasks)
    {
-    task.WorkIds ??=[];task.RequiredDebtCount=0;
-    var root=_state.Work.FirstOrDefault(w=>w.ExternalRequestId==task.Id);
-    if(task.WorkId==null&&root!=null)task.WorkId=root.Id;
+    task.RequiredDebtCount=0;
     if(task.WorkId==null)continue;
     var known=new HashSet<string>(StringComparer.Ordinal){task.WorkId};bool changed;
     do{changed=false;foreach(var child in _state.Work.Where(w=>w.ParentId!=null&&IsRevisionAttempt(w)&&known.Contains(w.ParentId)))if(known.Add(child.Id))changed=true;}while(changed);

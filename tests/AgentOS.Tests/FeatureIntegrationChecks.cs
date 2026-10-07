@@ -51,11 +51,14 @@ internal static class FeatureIntegrationChecks
         var first = new WorkUnit { ExternalRequestId = node.Id, Relationship = WorkRelationship.Original, Status = WorkStatus.Stale };
         var revision = new WorkUnit { ParentId = first.Id, Relationship = WorkRelationship.Revision, Status = WorkStatus.Completed };
         var followup = new WorkUnit { ParentId = revision.Id, Relationship = WorkRelationship.Followup, Status = WorkStatus.Completed, Task = "Separate followup" };
+        Check(state.Maps.Single(x => x.Id == mapId).Tasks.Single(x => x.Id == node.Id).WorkId == null, "Legacy logical task was already bound before recovery.");
         state.Work.AddRange([first, revision, followup]);
         typeof(ProjectRuntime).GetMethod("UpdateMapStatuses", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(runtime, null);
         var map = state.Maps.Single(x => x.Id == mapId);
         var mapped = map.Tasks.Single(x => x.Id == node.Id);
         var followupNode = map.Tasks.Single(x => x.WorkIds.Contains(followup.Id));
+        Check(map.Tasks.Count == 2, "Single refresh did not retain separate original and followup nodes.");
+        Check(mapped.WorkId == first.Id, "Original work did not bind to its logical map task before followup attachment.");
         Check(mapped.Status == MapTaskStatus.Completed, "Successful revision did not complete its logical map task.");
         Check(mapped.WorkIds.SequenceEqual([first.Id, revision.Id]), "Unrelated followup changed the logical attempt history.");
         Check(followupNode.Id != node.Id, "Separate followup reused the original logical node.");
