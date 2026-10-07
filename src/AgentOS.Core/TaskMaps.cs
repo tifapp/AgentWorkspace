@@ -1,4 +1,4 @@
-using System.Security.Cryptography;
+﻿using System.Security.Cryptography;
 namespace AgentOS.Core;
 public enum MapStatus { Draft, Active, Completed, Canceled }
 public enum MapEdgeKind { Dependency, Related, Followup }
@@ -78,13 +78,14 @@ public sealed partial class ProjectRuntime
   }
   Changed?.Invoke(); return id;
  }
+ public void CancelPendingMapForUpdate(string mapId) { lock(_sync) { if(_updateDrain==null)throw new InvalidOperationException("Project is not draining for an update."); var map=_state.Maps.Single(m=>m.Id==mapId); if(map.Status!=MapStatus.Active)throw new InvalidOperationException("Only an active map can be canceled."); map.Status=MapStatus.Canceled;map.Revision++;foreach(var task in map.Tasks.Where(t=>t.WorkId==null))task.Status=MapTaskStatus.Canceled;Event(null,"UpdateMapCanceled","User canceled unlaunched map tasks for signed update.");Save(); } Changed?.Invoke(); }
  public Task<IReadOnlyList<string>> StartSelectedMapTasksAsync(string mapId)
  {
   ObjectDisposedException.ThrowIf(_disposed, this);
   List<string> launched;
   lock (_sync)
   {
-   var map = _state.Maps.Single(m => m.Id == mapId); TaskMapRules.Validate(map);
+   RequireUpdateAdmission(); var map = _state.Maps.Single(m => m.Id == mapId); TaskMapRules.Validate(map);
    if (map.Status is MapStatus.Canceled or MapStatus.Completed) throw new InvalidOperationException("The map is closed.");
    if (string.IsNullOrWhiteSpace(_state.ValidationCommand)) throw new InvalidOperationException("Save a validation command in Project setup first.");
    UpdateMapStatuses();
@@ -100,7 +101,7 @@ public sealed partial class ProjectRuntime
  private List<string> LaunchReadyMapTasks(TaskMap map)
  {
   var launched = new List<string>();
-  if (_disposed || map.Status != MapStatus.Active) return launched;
+  if (_disposed || _updateDrain != null || map.Status != MapStatus.Active) return launched;
   foreach (var task in map.Tasks.Where(t => t.Selected && t.WorkId == null && TaskMapRules.DependenciesComplete(map, t)).ToArray())
   {
    // StartAsync persists the stable request ID before execution. Holding _sync also reserves the map node.
@@ -162,3 +163,4 @@ public sealed partial class ProjectRuntime
   }
  }
 }
+

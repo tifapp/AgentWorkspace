@@ -65,6 +65,7 @@ async Task<ProjectRuntime> NewRuntime()
 { var project = await PracticeProject.CreateAsync(root); return await ProjectRuntime.OpenInternal(project, Path.Combine(root, "state"), new ScriptHost(), Path.Combine(root, "coordination")); }
 static WorkUnit Work(ProjectRuntime runtime, string id) => runtime.Snapshot.Work.Single(w => w.Id == id);
 async Task TestAsync(string name, Func<Task> check) => await Test(name, check);
+await UpdateProtocolChecks.Run(Test, NewRuntime, root);
 
 // Feature helpers are independent gates. Missing concurrent helpers are reported, never counted as passes.
 await TestAsync("Resource admission and VM refusal", AgentOS.Tests.ResourceAdmissionChecks.RunAsync);
@@ -925,3 +926,4 @@ internal sealed class RepeatedContentionHost(string project) : IWorkHost
         return new(0, true, null);
     }
 }
+

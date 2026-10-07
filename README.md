@@ -69,3 +69,5 @@ Draft task-map source, desktop capture, map review, durable interactions, and ex
 Desktop capture, map review, interaction, and effect controls are described in [desktop interaction controls](docs/desktop-interactions.md).
 
 
+
+Production MSIX signing and cooperative updates require additional machine prerequisites; see [signed update protocol](docs/signed-update.md).

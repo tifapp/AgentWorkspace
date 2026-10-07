@@ -26,7 +26,7 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
     public static string Coverage => "Codex CLI 0.160.0 is the only supported host. Coordination is automatic. PowerShell edits and validation run in private Windows AppContainers with no network capabilities; native Codex tools are read-only. Private Git status, diff, add, commit and log use a scoped runtime adapter. The runtime rechecks and validates publication into agent-os/integrated, records evidence in its shared SQLite ledger, and owns loopback previews and process trees. Your checked-out branch is separate. External services, deployment, arbitrary native SDKs, network projects, aliases, links and unmanaged programs are not supported mediation surfaces. Unsupported operations do not receive a broader-permission fallback.";
 
     private ProjectRuntime(StateStore store, FileStream projectLock, ProjectState state, IWorkHost host, MachineCoordinator coordinator, IDisposable registration)
-    { Coordinator = coordinator; _runtimeRegistration = registration; _store = store; _projectLock = projectLock; _state = state; _host = host; _interactions = new TaskInteractionStore(store.Root); if (host is ManagedCodexHost managed) { managed.Interactions = _interactions; managed.Runtime = this; } }
+    { Coordinator = coordinator; _runtimeRegistration = registration; _store = store; _projectLock = projectLock; _state = state; _host = host; _interactions = new TaskInteractionStore(store.Root); RestoreUpdateDrain(); if (host is ManagedCodexHost managed) { managed.Interactions = _interactions; managed.Runtime = this; } }
 
     public static Task<ProjectRuntime> OpenAsync(string project, string? dataRoot = null, string? coordinatorRoot = null) => OpenInternal(project, dataRoot, new ManagedCodexHost(), coordinatorRoot);
     internal static async Task<ProjectRuntime> OpenInternal(string project, string? dataRoot, IWorkHost host, string? coordinatorRoot = null)
@@ -138,6 +138,7 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
                     return Task.FromResult(accepted.Id);
                 }
             }
+            RequireUpdateAdmission();
             if (string.IsNullOrWhiteSpace(_state.ValidationCommand)) throw new InvalidOperationException("Save a validation command in Project setup first.");
             WorkUnit? parent = null;
             if (parentId != null) parent = _state.Work.SingleOrDefault(x => x.Id == parentId)
@@ -216,6 +217,7 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
         var work = Find(id);
         lock (_sync)
         {
+            RequireUpdateAdmission();
             if (_state.Conflicts.Any(x => x.WorkId == id && !x.Resolved && !x.Abandoned)) throw new InvalidOperationException("Deferred conflict remains unresolved.");
             if (work.Status == WorkStatus.Completed) return Task.CompletedTask;
             if (work.Status != WorkStatus.Private) throw new InvalidOperationException("Only a prepared private candidate can be integrated. Revise stale or failed work first.");
@@ -381,6 +383,7 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
 
     public async Task DecideAsync(string decisionId, bool approve)
     {
+        using var updateLease = EnterUpdatePublication();
         await _publication.WaitAsync(_lifetime.Token);
         try
         {
@@ -482,3 +485,6 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
         _lifetime.Dispose(); _projectLock.Dispose(); _publication.Dispose(); _runtimeRegistration.Dispose();
     }
 }
+
+
+

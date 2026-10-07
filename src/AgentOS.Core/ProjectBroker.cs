@@ -1,4 +1,4 @@
-using System.IO.Pipes;
+﻿using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
 
@@ -29,9 +29,15 @@ internal sealed class ProjectBroker : IAsyncDisposable
                     var line = await reader.ReadLineAsync(timeout.Token) ?? throw new IOException("Empty project request.");
                     if (line.Length > 200000) throw new ArgumentException("Project request is too large.");
                     var request = JsonSerializer.Deserialize<BrokerRequest>(line, JsonFormat.Options) ?? throw new IOException("Invalid project request.");
+                    RuntimeProtocol? health = null; UpdateDrain? drain = null; UpdateReadiness? ready = null;
                     WorkUnit? work = null; IReadOnlyList<TaskMap>? maps = null; IReadOnlyList<string>? started = null; IReadOnlyList<TaskInteraction>? interactions = null; TaskInteraction? interaction = null; IReadOnlyList<ConflictNotice>? conflicts = null; IReadOnlyList<HumanEscalation>? escalations = null;
                     switch (request.Operation)
                     {
+                        case "update-health": health = _runtime.UpdateHealth; break;
+                        case "update-drain": timeout.CancelAfter(TimeSpan.FromMinutes(2)); drain = await _runtime.BeginUpdateDrainAsync(request.UpdateScope ?? throw new ArgumentException("Update scope required.")); break;
+                        case "update-ready": ready = _runtime.UpdateReady(request.UpdateToken ?? ""); break;
+                        case "update-exit": _runtime.RequestUpdateExit(request.UpdateToken ?? ""); break;
+                        case "update-cancel-map": _runtime.CancelPendingMapForUpdate(request.WorkId ?? throw new ArgumentException("Map id required.")); break;
                         case "start":
                             if (request.RequestId == null) throw new ArgumentException("A stable task request identity is required.");
                             if (request.Validation != null && request.Validation.Trim() != _runtime.Snapshot.ValidationCommand)
@@ -68,7 +74,7 @@ internal sealed class ProjectBroker : IAsyncDisposable
                         case "cancel-wait": interaction = _runtime.CancelWait(request.WorkId!, request.InteractionId!); break;
                         default: throw new UnauthorizedAccessException("Unsupported project request.");
                     }
-                    response = JsonSerializer.Serialize(new BrokerResponse(work, null, maps, started, interactions, interaction, conflicts, escalations), Wire);
+                    response = JsonSerializer.Serialize(new BrokerResponse(work, null, maps, started, interactions, interaction, conflicts, escalations, health, drain, ready), Wire);
                 }
                 catch (Exception e) { response = JsonSerializer.Serialize(new BrokerResponse(null, e.Message), Wire); }
                 await writer.WriteLineAsync(response.AsMemory(), timeout.Token);
@@ -110,6 +116,11 @@ public static class ProjectClient
     public static async Task<TaskInteraction?> ResolveAsync(string project, string workId, string obligationId, string text, CancellationToken cancel = default) => (await Call(project, new("resolve", null, null, workId, null, InteractionId: obligationId, Text: text), cancel))?.Interaction;
     public static async Task<TaskInteraction?> WaitAsync(string project, string workId, WaitKind kind, string target, DateTimeOffset? deadline = null, CancellationToken cancel = default) => (await Call(project, new("wait", null, null, workId, null, TargetId: target, WaitKind: kind, Deadline: deadline), cancel))?.Interaction;
     public static async Task<TaskInteraction?> CancelWaitAsync(string project, string workId, string waitId, CancellationToken cancel = default) => (await Call(project, new("cancel-wait", null, null, workId, null, InteractionId: waitId), cancel))?.Interaction;
+    public static async Task<RuntimeProtocol?> UpdateHealthAsync(string project) => (await Call(project, new("update-health", null, null, null, null), default))?.Health;
+    public static async Task<UpdateDrain?> BeginUpdateDrainAsync(string project, UpdateScope scope) => (await Call(project, new("update-drain", null, null, null, null, UpdateScope: scope), default))?.Drain;
+    public static async Task<UpdateReadiness?> UpdateReadyAsync(string project, string token) => (await Call(project, new("update-ready", null, null, null, null, UpdateToken: token), default))?.Ready;
+    public static async Task<bool> UpdateExitAsync(string project, string token) => (await Call(project, new("update-exit", null, null, null, null, UpdateToken: token), default)) != null;
+    public static async Task<bool> CancelPendingMapForUpdateAsync(string project,string mapId) => (await Call(project,new("update-cancel-map",null,null,mapId,null),default)) != null;
     [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
     private static extern bool WaitNamedPipe(string name, int timeout);
     private static async Task<BrokerResponse?> Call(string project, BrokerRequest request, CancellationToken cancel)
@@ -132,6 +143,7 @@ public static class ProjectClient
         return response;
     }
 }
-internal sealed record BrokerRequest(string Operation, string? Task, string? RequestId, string? WorkId, string? Validation, TaskMap? Map = null, long? ExpectedRevision = null, string? InteractionId = null, string? Text = null, string? TargetId = null, WaitKind? WaitKind = null, DateTimeOffset? Deadline = null);
+internal sealed record BrokerRequest(string Operation, string? Task, string? RequestId, string? WorkId, string? Validation, TaskMap? Map = null, long? ExpectedRevision = null, string? InteractionId = null, string? Text = null, string? TargetId = null, WaitKind? WaitKind = null, DateTimeOffset? Deadline = null, UpdateScope? UpdateScope = null, string? UpdateToken = null);
 public sealed record ConflictInspection(IReadOnlyList<ConflictNotice> Conflicts, IReadOnlyList<HumanEscalation> Escalations);
-internal sealed record BrokerResponse(WorkUnit? Work, string? Error, IReadOnlyList<TaskMap>? Maps = null, IReadOnlyList<string>? Started = null, IReadOnlyList<TaskInteraction>? Interactions = null, TaskInteraction? Interaction = null, IReadOnlyList<ConflictNotice>? Conflicts = null, IReadOnlyList<HumanEscalation>? Escalations = null);
+internal sealed record BrokerResponse(WorkUnit? Work, string? Error, IReadOnlyList<TaskMap>? Maps = null, IReadOnlyList<string>? Started = null, IReadOnlyList<TaskInteraction>? Interactions = null, TaskInteraction? Interaction = null, IReadOnlyList<ConflictNotice>? Conflicts = null, IReadOnlyList<HumanEscalation>? Escalations = null, RuntimeProtocol? Health = null, UpdateDrain? Drain = null, UpdateReadiness? Ready = null);
+

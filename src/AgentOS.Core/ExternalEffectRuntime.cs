@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Data.Common;
 using System.Security.Cryptography;
 using System.Text;
@@ -113,7 +113,7 @@ public sealed partial class ProjectRuntime
   return profile==null?null:new HyperVExecution(_store.Root,profile,d,commit=>BinaryBlob(commit,d.ArtifactPath));
  }
  static Func<DbConnection> PgConnection(PostgreSqlEffectSettings p)=>PostgreSqlProvider.SecureConnectionFactory(p,new WindowsCredentialManagerProvider());
- async Task<T> Guard<T>(Func<Task<T>> f,CancellationToken ct){await _publication.WaitAsync(ct);try{return await f();}finally{_publication.Release();}}
+ async Task<T> Guard<T>(Func<Task<T>> f,CancellationToken ct,bool admit=false){lock(_sync){if(admit)RequireUpdateAdmission();_externalExecuting++;}try{await _publication.WaitAsync(ct);try{return await f();}finally{_publication.Release();}}finally{lock(_sync)_externalExecuting--;}}
  static string Id(ExternalEffectRequest r)=>H(JsonSerializer.Serialize(r));
  static string ExternalAdmissionKey(EffectScope scope)
  {
@@ -121,7 +121,7 @@ public sealed partial class ProjectRuntime
   if(scope.Kind=="postgresql"){var p=JsonSerializer.Deserialize<PostgreSqlMigration>(scope.ParametersJson)!;return "external:postgresql:"+scope.Destination+":"+p.Schema;}
   return "external:"+scope.Kind+":"+scope.Destination;
  }
- public Task<EffectIntent> PrepareExternalEffectAsync(ExternalEffectRequest r,CancellationToken ct=default)=>Guard(async()=>{var scope=await Scope(r,ct);return await Adapter(r.Provider,null,null,null).PrepareAsync(Id(r),scope,ct);},ct);
+ public Task<EffectIntent> PrepareExternalEffectAsync(ExternalEffectRequest r,CancellationToken ct=default)=>Guard(async()=>{var scope=await Scope(r,ct);return await Adapter(r.Provider,null,null,null).PrepareAsync(Id(r),scope,ct);},ct,true);
  async Task<(EffectIntent,IEffectAdapter)> Checked(string id,HttpMessageHandler? transport,Func<DbConnection>? connection,IIsolatedDeploymentExecutor? executor,CancellationToken ct)
  {
   var intent=Journal.Read(id)??throw new InvalidOperationException("Unknown effect intent.");
@@ -132,7 +132,7 @@ public sealed partial class ProjectRuntime
   if(current!=intent.Scope)throw new InvalidOperationException("Effect scope is stale.");
   return(intent,Adapter(intent.Scope.Kind,transport,connection,executor));
  }
- public Task<EffectIntent> ApproveExternalEffectAsync(string id,string digest,string approver,CancellationToken ct=default)=>Guard(async()=>{await Checked(id,null,null,null,ct);return Journal.Approve(id,digest,approver);},ct);
+ public Task<EffectIntent> ApproveExternalEffectAsync(string id,string digest,string approver,CancellationToken ct=default)=>Guard(async()=>{await Checked(id,null,null,null,ct);return Journal.Approve(id,digest,approver);},ct,true);
  public Task<EffectIntent> ExecuteExternalEffectAsync(string id,HttpMessageHandler? transport=null,Func<DbConnection>? connection=null,IIsolatedDeploymentExecutor? executor=null,CancellationToken ct=default)=>Guard(async()=>
  {
   var(intent,adapter)=await Checked(id,transport,connection,executor,ct);
@@ -140,7 +140,7 @@ public sealed partial class ProjectRuntime
   using var ownership=await Coordinator.EnterAsync(ExternalAdmissionKey(intent.Scope),"external effect",null,ct);
   (_,adapter)=await Checked(id,transport,connection,executor,ct);
   return await adapter.ExecuteAsync(id,ct);
- },ct);
+ },ct,true);
  IEffectAdapter FrozenAdapter(EffectIntent intent,HttpMessageHandler? transport,Func<DbConnection>? connection,IIsolatedDeploymentExecutor? executor)
  {
   if(intent.Scope.Kind=="github"){var g=JsonSerializer.Deserialize<GitHubEffect>(intent.Scope.ParametersJson)??throw new InvalidDataException("Frozen GitHub destination absent.");if(g.ApiOrigin+"/"+g.Owner+"/"+g.Repository!=intent.Scope.Destination)throw new InvalidDataException("Frozen destination changed.");return new GitHubEffects(Journal,new PersistedGitHubCredentials(),transport,[g.ApiOrigin]);}
@@ -192,6 +192,7 @@ internal sealed class PersistedGitHubCredentials : IScopedCredentialProvider
   finally{CredFree(ptr);}
  }
 }
+
 
 
 

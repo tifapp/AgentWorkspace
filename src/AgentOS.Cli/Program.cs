@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using AgentOS.Core;
 using System.Text.Json;
 
@@ -6,6 +7,13 @@ try
     if (args.Length == 0 || args[0] == "help")
     {
         Console.WriteLine(@"agent-os: Codex-only Windows runtime
+  update-health <project>
+  update-drain <project> <sha256> <version> <architecture> <install-root> <package> <signer>
+  update-ready <project> <token>
+  update-exit <project> <token>
+  update-cancel-map <project> <map-id>
+  update-handshake <protocol> <maximum-schema> <assembly-sha256>
+  update-restart <project> <data-root>
   doctor
   practice <parent-folder>
   walkthrough <parent-folder> [data-folder]
@@ -38,6 +46,35 @@ try
     }
     switch (args[0])
     {
+        case "update-health": Console.WriteLine(JsonSerializer.Serialize(await ProjectClient.UpdateHealthAsync(args[1]) ?? throw new IOException("Owning runtime unavailable."), JsonFormat.Options)); return 0;
+        case "update-drain":
+        {
+            var scope = new UpdateScope(args[2], args[3], args[4], Path.GetFullPath(args[5]), Path.GetFullPath(args[1]), Path.GetFullPath(args[6]), args[7]);
+            Console.WriteLine(JsonSerializer.Serialize(await ProjectClient.BeginUpdateDrainAsync(args[1], scope) ?? throw new IOException("Owning runtime unavailable."), JsonFormat.Options)); return 0;
+        }
+        case "update-ready":
+        {
+            var ready = await ProjectClient.UpdateReadyAsync(args[1], args[2]) ?? throw new IOException("Owning runtime unavailable.");
+            Console.WriteLine(JsonSerializer.Serialize(ready, JsonFormat.Options)); return ready.Ready ? 0 : 2;
+        }
+        case "update-exit": if (!await ProjectClient.UpdateExitAsync(args[1], args[2])) throw new IOException("Owning runtime unavailable."); Console.WriteLine("Cooperative exit requested."); return 0;
+        case "update-cancel-map": if (!await ProjectClient.CancelPendingMapForUpdateAsync(args[1],args[2])) throw new IOException("Owning runtime unavailable."); Console.WriteLine("Unlaunched map tasks canceled."); return 0;
+        case "update-handshake":
+        {
+            var h = RuntimeUpdate.Health();
+            if (h.Version != int.Parse(args[1]) || h.StateSchema > int.Parse(args[2]) || !string.Equals(h.AssemblySha256, args[3], StringComparison.OrdinalIgnoreCase) || !new[] { "scoped-drain", "cooperative-exit", "schema2", "signed-msix-handshake" }.All(h.Capabilities.Contains)) throw new InvalidOperationException("Installed CLI protocol, schema, assembly hash or capabilities incompatible.");
+            Console.WriteLine(JsonSerializer.Serialize(h, JsonFormat.Options)); return 0;
+        }
+        case "update-restart":
+        {
+            var app = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "AgentOS.exe"));
+            if (!File.Exists(app)) throw new FileNotFoundException("Packaged runtime entrypoint missing.", app);
+            var launch = new ProcessStartInfo(app) { UseShellExecute = true };
+            launch.ArgumentList.Add("--project"); launch.ArgumentList.Add(Path.GetFullPath(args[1]));
+            launch.ArgumentList.Add("--data-root"); launch.ArgumentList.Add(Path.GetFullPath(args[2]));
+            if (Process.Start(launch) == null) throw new IOException("Packaged runtime launch refused.");
+            Console.WriteLine("Packaged runtime launch accepted."); return 0;
+        }
         case "doctor":
             var checks = await HostDiscovery.CheckAsync();
             Console.WriteLine(JsonSerializer.Serialize(checks, JsonFormat.Options));
@@ -245,3 +282,4 @@ try
     }
 }
 catch (Exception e) { Console.Error.WriteLine(e.ToString()); return 1; }
+

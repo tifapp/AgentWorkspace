@@ -165,6 +165,7 @@ public sealed partial class ProjectRuntime
         var work = Find(workId);
         lock (_sync)
         {
+            RequireUpdateAdmission();
             if (work.Status is not (WorkStatus.NeedsResponse or WorkStatus.Parked) || !_state.Conflicts.Any(x => x.WorkId == workId && !x.Resolved && !x.Abandoned))
                 throw new InvalidOperationException("No unresolved conflict to resume.");
             if (string.IsNullOrWhiteSpace(work.ThreadId)) throw new InvalidOperationException("Original Codex thread is unavailable.");

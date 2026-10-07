@@ -101,7 +101,7 @@ public sealed class MainWindow : Window
     {
         if(runtime?.Snapshot.Work.Any(x=>x.IsActive)==true)throw new InvalidOperationException("Finish or cancel active tasks before switching projects.");
         if(runtime!=null){await runtime.DisposeAsync();runtime=null;}
-        runtime=await ProjectRuntime.OpenAsync(projectPath.Text,dataRoot); snapshot=runtime.Snapshot;
+        runtime=await ProjectRuntime.OpenAsync(projectPath.Text,dataRoot); runtime.CooperativeExitRequested += () => DispatcherQueue.TryEnqueue(() => Close()); snapshot=runtime.Snapshot;
         validation.Text=snapshot.ValidationCommand;
         if(string.IsNullOrWhiteSpace(validation.Text)&&File.Exists(Path.Combine(snapshot.ProjectPath,"Validate.ps1")))validation.Text=PracticeProject.ValidateCommand;
         projectName.Text=snapshot.ProjectName;
@@ -432,6 +432,7 @@ public sealed class MainWindow : Window
     static Border Card(string title,UIElement content)
     {var stack=new StackPanel{Spacing=5};stack.Children.Add(Label(title,13,true));stack.Children.Add(content);return new Border{Child=stack,Padding=new Thickness(10),CornerRadius=new CornerRadius(6),BorderThickness=new Thickness(1),Background=Application.Current.Resources["CardBackgroundFillColorDefaultBrush"] as Brush,BorderBrush=Application.Current.Resources["CardStrokeColorDefaultBrush"] as Brush};}
 }
+
 
 
 
