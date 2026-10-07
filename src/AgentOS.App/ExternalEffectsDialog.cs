@@ -22,10 +22,10 @@ public sealed class ExternalEffectsDialog : Window
   foreach(var v in new[]{"github","postgresql","deployment"})provider.Items.Add(v);
   foreach(var c in new Control[]{work,provider,operation,origin,owner,repo,branch,baseBranch,host,port,database,schema,user,backend,destination,artifactPath,command,environment,source,title,body,review,approver,history})panel.Children.Add(c);
   provider.SelectionChanged+=(_,_)=>{operation.Items.Clear();foreach(var v in (provider.SelectedItem as string) switch{"github"=>new[]{"branch","pull_request"},"postgresql"=>new[]{"migration"},"deployment"=>new[]{"deploy"},_=>Array.Empty<string>()})operation.Items.Add(v);operation.SelectedIndex=operation.Items.Count>0?0:-1;};
-  var save=Button("Save provider settings",SaveSettings),prepare=Button("Prepare exact scope",async()=>await Prepare()),inspect=Button("Inspect history",Inspect),cancel=Button("Cancel prepared",async()=>await Act(x=>runtime.CancelExternalEffectAsync(x))),reconcile=Button("Reconcile unknown",async()=>await Act(x=>runtime.ReconcileExternalEffectAsync(x)));
+  Button save=Button("Save provider settings",SaveSettings),prepare=Button("Prepare exact scope",async()=>await Prepare()),inspect=Button("Inspect history",Inspect),cancel=Button("Cancel prepared",async()=>await Act(x=>runtime.CancelExternalEffectAsync(x))),reconcile=Button("Reconcile unknown",async()=>await Act(x=>runtime.ReconcileExternalEffectAsync(x)));
   approve.Click+=async(_,_)=>await Act(x=>runtime.ApproveExternalEffectAsync(x,selected!.Scope.Digest,approver.Text.Trim()));
   execute.Click+=async(_,_)=>await Act(x=>runtime.ExecuteExternalEffectAsync(x));
-  foreach(var c in new Control[]{save,prepare,approve,execute,inspect,cancel,reconcile,status})panel.Children.Add(c);
+  foreach(var c in new UIElement[]{save,prepare,approve,execute,inspect,cancel,reconcile,status})panel.Children.Add(c);
   Content=new ScrollViewer{Content=panel};LoadSettings();Refresh();
  }
  static Button Button(string text,Action action){var b=new Button{Content=text};b.Click+=(_,_)=>action();return b;}
