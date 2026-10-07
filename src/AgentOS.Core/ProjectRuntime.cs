@@ -203,7 +203,7 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
             throw new IOException("Candidate contains symbolic links or submodules, which this release cannot mediate.");
         var candidate = await Commit(work.Workspace, tree, work.BaseCommit, "agent-os: " + work.ShortTask);
         (await Commands.Git(_state.ProjectPath, "fetch", "--no-tags", "--no-write-fetch-head", work.Workspace, "+" + candidate + ":refs/agent-os/candidates/" + work.Id)).Checked();
-        var paths = (await Commands.Git(work.Workspace, "diff", "--name-only", "-z", work.BaseCommit, candidate)).Checked().Split('\0', StringSplitOptions.RemoveEmptyEntries).ToList();
+        var paths = (await Commands.Git(work.Workspace, "diff", "--name-only", "--no-renames", "-z", work.BaseCommit, candidate)).Checked().Split('\0', StringSplitOptions.RemoveEmptyEntries).ToList();
         var diff = (await Commands.Git(work.Workspace, "diff", "--no-ext-diff", "--no-textconv", work.BaseCommit, candidate)).Checked();
         Mutate(() => { work.CandidateCommit = candidate; work.ChangedPaths = paths; work.Diff = diff; });
     }
