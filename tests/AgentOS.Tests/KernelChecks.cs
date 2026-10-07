@@ -29,14 +29,19 @@ internal static class KernelChecks
             using var doc=JsonDocument.Parse(File.ReadAllText(Path.Combine(path,"registry.json")));Check(doc.RootElement.GetProperty("messages")[0].GetProperty("text").GetString()==payload,"Projection text roundtrip changed bytes.");return Task.CompletedTask;
         });
         await test("Kernel registration, authentication and spoof rejection",()=>{
-            var path=Fresh(root,"identity");using var service=new CoordinationService(path);
-            var session=service.Register("registration", "stable-1", "team");var again=service.Register("registration","stable-1","team");
-            Check(session==again,"Registration retry changed incarnation or capability.");var actor=service.Authenticate(session);Check(actor.Address==session.Id,"Wrong address.");
-            Refuses<UnauthorizedAccessException>(()=>service.Authenticate(session with {Capability="bad"}));
-            Refuses<UnauthorizedAccessException>(()=>service.Authenticate(session with {ProcessCreatedUtcTicks=0}));
-            using var other=new CoordinationService(Fresh(root,"other-service"));Refuses<UnauthorizedAccessException>(()=>other.CreateAction(actor,"spoof","key"));
-            foreach(var file in Directory.GetFiles(path,"coordination.sqlite*"))Check(!System.Text.Encoding.UTF8.GetString(File.ReadAllBytes(file)).Contains(session.Capability),"Plaintext capability stored in database or WAL.");
-            var first=service.Snapshot().Generation;Check(service.Heartbeat(actor,1,"beat")==2&&service.Snapshot().Generation==first+1,"Heartbeat revision or projection failed.");
+            var path=Fresh(root,"identity");ParticipantSession session;
+            using(var service=new CoordinationService(path)){
+                session=service.Register("registration", "stable-1", "team");var again=service.Register("registration","stable-1","team");
+                Check(session==again,"Registration retry changed incarnation or capability.");var actor=service.Authenticate(session);Check(actor.Address==session.Id,"Wrong address.");
+                Refuses<UnauthorizedAccessException>(()=>service.Authenticate(session with {Capability="bad"}));
+                Refuses<UnauthorizedAccessException>(()=>service.Authenticate(session with {ProcessCreatedUtcTicks=0}));
+                using(var other=new CoordinationService(Fresh(root,"other-service"))){Refuses<UnauthorizedAccessException>(()=>other.CreateAction(actor,"spoof","key"));}
+                var first=service.Snapshot().Generation;Check(service.Heartbeat(actor,1,"beat")==2&&service.Snapshot().Generation==first+1,"Heartbeat revision or projection failed.");
+            }
+            var database=Path.Combine(path,"coordination.sqlite");
+            Check(File.Exists(database),"Committed coordination database missing.");
+            foreach(var file in new[]{database,database+"-wal"}.Where(File.Exists))
+                Check(!System.Text.Encoding.UTF8.GetString(File.ReadAllBytes(file)).Contains(session.Capability),"Plaintext capability stored in database or WAL.");
             return Task.CompletedTask;
         });
         await test("Kernel action assignment race, revisions and idempotency",async()=>{
