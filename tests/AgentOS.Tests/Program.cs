@@ -48,6 +48,28 @@ static async Task Eventually(Func<bool> condition, int seconds = 30)
 async Task<ProjectRuntime> NewRuntime()
 { var project = await PracticeProject.CreateAsync(root); return await ProjectRuntime.OpenInternal(project, Path.Combine(root, "state"), new ScriptHost()); }
 static WorkUnit Work(ProjectRuntime runtime, string id) => runtime.Snapshot.Work.Single(w => w.Id == id);
+async Task TestAsync(string name, Func<Task> check) => await Test(name, check);
+
+// Feature helpers are independent gates. Missing concurrent helpers are reported, never counted as passes.
+await TestAsync("Resource admission and VM refusal", AgentOS.Tests.ResourceAdmissionChecks.RunAsync);
+await TestAsync("External effects request, receipt, and refusal", AgentOS.Tests.ExternalEffectTests.RunAsync);
+await TestAsync("Feature integration: map attempts and interaction journal", () => AgentOS.Tests.FeatureIntegrationChecks.RunAsync(Path.Combine(root, "feature-integration")));
+await TestAsync("Notifications: persistence, deduplication, history, quiet hours", () => AgentOS.Tests.NotificationChecks.RunAsync(Path.Combine(root, "notifications")));
+foreach (var helperName in new[] { "GitProfileChecks", "ExecutionProfileChecks", "ContextArtifactChecks", "UpdateProtocolChecks", "ForegroundCaptureChecks", "MapInteractionChecks", "WorkExecutionChecks", "ExternalDeliveryChecks", "NotificationDeliveryChecks" })
+{
+    var type = typeof(Program).Assembly.GetType("AgentOS.Tests." + helperName);
+    var run = type?.GetMethod("RunAsync", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+    if (run == null) { Console.WriteLine("NOT PRESENT " + helperName + " (no coverage claimed)"); continue; }
+    await TestAsync(helperName, async () =>
+    {
+        var parameters = run.GetParameters();
+        var invocation = parameters.Length == 0 ? run.Invoke(null, null)
+            : parameters.Length == 1 && parameters[0].ParameterType == typeof(string) ? run.Invoke(null, [Path.Combine(root, helperName)])
+            : throw new InvalidOperationException(helperName + ".RunAsync has an unsupported signature.");
+        if (invocation is not Task task) throw new InvalidOperationException(helperName + ".RunAsync must return Task.");
+        await task;
+    });
+}
 await Test("Steering request binds delivery to the active turn", async () =>
 {
     var wire = JsonSerializer.Serialize(ManagedCodexHost.SteeringParameters("thread-1", "turn-7", "revise"));
@@ -721,3 +743,6 @@ internal sealed class RepeatedContentionHost(string project) : IWorkHost
         return new(0, true, null);
     }
 }
+
+
+
