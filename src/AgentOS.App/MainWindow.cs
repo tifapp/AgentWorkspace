@@ -1,404 +1,296 @@
-using AgentOS.Core;
-using Microsoft.UI;
+﻿using AgentOS.Core;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using System.Diagnostics;
 using System.Text.Json;
 using Windows.Storage.Pickers;
+using Windows.System;
 
 namespace AgentOS.App;
-
 public sealed class MainWindow : Window
 {
-    private static readonly SolidColorBrush Ink = Brush(0x1D, 0x2D, 0x28), Muted = Brush(0x55, 0x66, 0x5E), Accent = Brush(0x0F, 0x6E, 0x56), Line = Brush(0xD9, 0xE1, 0xDC);
-    private readonly Grid _root = new();
-    private readonly StackPanel _navigation = new() { Spacing = 8, Padding = new Thickness(20, 28, 20, 20) };
-    private readonly Grid _body = new() { Padding = new Thickness(28, 22, 28, 24), RowSpacing = 18 };
-    private readonly TextBlock _projectTitle = Text("Open a project", 26, true);
-    private readonly TextBlock _projectSubtitle = Text("A local workspace for autonomous Codex work", 13);
-    private readonly InfoBar _notice = new() { IsOpen = false, IsClosable = true };
-    private readonly ContentControl _page = new() { HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch };
-    private readonly TextBox _projectPath = new() { Header = "Local Git project", PlaceholderText = @"C:\Projects\my-project", MinWidth = 280 };
-    private readonly TextBox _validation = new() { Header = "Validation command (PowerShell syntax)", PlaceholderText = "dotnet test; exit $LASTEXITCODE", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = 70 };
-    private readonly TextBox _prompt = new() { Header = "What should Codex do?", PlaceholderText = "Describe a change, its intended behavior, and how to check it…", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = 86, MaxHeight = 160 };
-    private readonly CheckBox _auto = new() { Content = "Validate and integrate automatically", IsChecked = true };
-    private readonly ListView _workList = new() { SelectionMode = ListViewSelectionMode.Single, HorizontalContentAlignment = HorizontalAlignment.Stretch };
-    private readonly StackPanel _details = new() { Spacing = 14, Padding = new Thickness(22, 8, 12, 20) };
-    private readonly StackPanel _decisions = new() { Spacing = 16 };
-    private readonly StackPanel _evidence = new() { Spacing = 14 };
-    private readonly StackPanel _prerequisites = new() { Spacing = 10 };
-    private readonly TextBlock _navProject = Text("No project open", 12);
-    private readonly TextBlock _counts = Text("", 12);
-    private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromMilliseconds(800) };
-    private readonly string _settings = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AgentOS", "desktop.json");
-    private ProjectRuntime? _runtime;
-    private ProjectState? _snapshot;
-    private string _activePage = "Setup";
-    private string? _selected;
-    private long _generation = -1;
-    private bool _closing, _rebuilding, _walkthrough;
-    private string? _dataRoot;
+    readonly Grid root = new() { RowSpacing = 8, Padding = new Thickness(16,12,16,12) };
+    readonly Grid surface = new() { ColumnSpacing = 12 };
+    readonly StackPanel tree = new() { Spacing = 8 };
+    readonly ScrollViewer map = new() { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
+    readonly ScrollViewer detail = new() { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
+    readonly StackPanel detailBody = new() { Spacing = 10 };
+    readonly TextBlock projectName = Label("Open a project",18,true), summary = Label("",12);
+    readonly TextBlock detailHeading = Label("",18,true), detailStatus = Label("",13);
+    readonly Button decisions = new() { Content = "Decisions" };
+    readonly InfoBar notice = new() { IsOpen = false, IsClosable = true };
+    readonly TextBox prompt = new() { Header = "New task", PlaceholderText = "Describe the change and how to check it", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = 72, MaxHeight = 136 };
+    readonly TextBox projectPath = new() { Header = "Local Git project", PlaceholderText = @"C:\Projects\my-project" };
+    readonly TextBox validation = new() { Header = "Validation command (PowerShell syntax)", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = 72 };
+    readonly CheckBox auto = new() { Content = "Validate and integrate automatically", IsChecked = true };
+    readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromMilliseconds(800) };
+    readonly Dictionary<string, TaskRow> rows = new();
+    readonly string settings = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"AgentOS","desktop.json");
+    ProjectRuntime? runtime; ProjectState? snapshot; string? dataRoot, selected;
+    long generation = -1; bool closing, detailsOpen, wide, walkthrough;
 
     public MainWindow()
     {
-        Title = "agent os · Codex workspace";
-        AppWindow.Resize(new Windows.Graphics.SizeInt32(1280, 900));
-        _root.RequestedTheme = ElementTheme.Light;
-        _root.Background = Brush(0xF5, 0xF7, 0xF4);
-        _root.ColumnDefinitions.Add(new() { Width = new GridLength(210) });
-        _root.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
-        var side = new Border { Background = Brush(0xEA, 0xEF, 0xEA), BorderBrush = Line, BorderThickness = new Thickness(0, 0, 1, 0), Child = _navigation };
-        _root.Children.Add(side);
-        var mark = Text("a /", 30, true); mark.Foreground = Accent;
-        _navigation.Children.Add(mark);
-        _navigation.Children.Add(Text("agent os", 22, true));
-        _navigation.Children.Add(Text("CODEX WORKSPACE", 10, true));
-        _navProject.Margin = new Thickness(0, 24, 0, 12);
-        _navigation.Children.Add(_navProject);
-        foreach (var name in new[] { "Workspace", "Decisions", "Evidence", "Setup" })
-        {
-            var nav = Button(name, () => { ShowPage(name); return Task.CompletedTask; }, "Nav" + name);
-            nav.HorizontalAlignment = HorizontalAlignment.Stretch;
-            nav.HorizontalContentAlignment = HorizontalAlignment.Left;
-            nav.Padding = new Thickness(12, 10, 12, 10);
-            _navigation.Children.Add(nav);
-        }
-        var footer = Text("Ordinary tools.\nCoordinated results.", 12); footer.Margin = new Thickness(0, 36, 0, 0);
-        _navigation.Children.Add(footer);
-        _navigation.Children.Add(_counts);
-        Grid.SetColumn(_body, 1); _root.Children.Add(_body);
-        _body.RowDefinitions.Add(new() { Height = GridLength.Auto });
-        _body.RowDefinitions.Add(new() { Height = GridLength.Auto });
-        _body.RowDefinitions.Add(new() { Height = new GridLength(1, GridUnitType.Star) });
-        var heading = new StackPanel { Spacing = 5 }; heading.Children.Add(_projectTitle); heading.Children.Add(_projectSubtitle);
-        _body.Children.Add(heading);
-        Grid.SetRow(_notice, 1); _body.Children.Add(_notice);
-        Grid.SetRow(_page, 2); _body.Children.Add(_page);
-        Content = _root;
-        AutomationProperties.SetAutomationId(_projectPath, "ProjectPath");
-        AutomationProperties.SetAutomationId(_validation, "ValidationCommand");
-        AutomationProperties.SetAutomationId(_prompt, "TaskPrompt");
-        AutomationProperties.SetAutomationId(_workList, "WorkList");
-        _workList.SelectionChanged += (_, _) => { if (!_rebuilding && _workList.SelectedItem is ListViewItem item) { _selected = (string)item.Tag; DrawDetails(); } };
-        _root.SizeChanged += (_, e) => { var compact = e.NewSize.Width < 1000; _root.ColumnDefinitions[0].Width = new(compact ? 165 : 210); _body.Padding = new Thickness(compact ? 16 : 28, 22, compact ? 16 : 28, 24); };
-        AppWindow.Closing += async (_, e) =>
-        {
-            if (_closing) return;
-            e.Cancel = true; _closing = true; _timer.Stop();
-            _notice.IsOpen = true; _notice.Title = "Stopping owned processes and saving state…";
-            if (_runtime != null) await _runtime.DisposeAsync();
-            Close();
-        };
-        _timer.Tick += (_, _) => Refresh();
-        _timer.Start();
-        ShowPage("Setup");
-        _root.Loaded += async (_, _) => await Guard(Initialize);
+        Title = "Agent OS"; AppWindow.Resize(new Windows.Graphics.SizeInt32(1040,760));
+        root.RowDefinitions.Add(new(){Height=GridLength.Auto});
+        root.RowDefinitions.Add(new(){Height=GridLength.Auto});
+        root.RowDefinitions.Add(new(){Height=new GridLength(1,GridUnitType.Star)});
+        root.RowDefinitions.Add(new(){Height=GridLength.Auto});
+        var header = new Grid{ColumnSpacing=8};
+        header.ColumnDefinitions.Add(new(){Width=new GridLength(1,GridUnitType.Star)});
+        header.ColumnDefinitions.Add(new(){Width=GridLength.Auto});
+        var identity = new StackPanel{Spacing=1}; identity.Children.Add(projectName); identity.Children.Add(summary); header.Children.Add(identity);
+        var controls = new StackPanel{Orientation=Orientation.Horizontal,Spacing=6};
+        controls.Children.Add(Action("Project",ShowSettings,"ProjectChooser"));
+        controls.Children.Add(Action("Settings",ShowSettings,"Settings"));
+        decisions.Click += (_,_) => ShowDecisionMenu();
+        AutomationProperties.SetAutomationId(decisions,"PendingDecisions"); controls.Children.Add(decisions);
+        Grid.SetColumn(controls,1); header.Children.Add(controls); root.Children.Add(header);
+        Grid.SetRow(notice,1); root.Children.Add(notice);
+        map.Content=tree; AutomationProperties.SetAutomationId(map,"WorkList");
+        surface.ColumnDefinitions.Add(new(){Width=new GridLength(1,GridUnitType.Star)});
+        surface.ColumnDefinitions.Add(new(){Width=new GridLength(0)});
+        surface.Children.Add(map); detail.Content=detailBody; Grid.SetColumn(detail,1); surface.Children.Add(detail);
+        Grid.SetRow(surface,2); root.Children.Add(surface);
+        var composer=new StackPanel{Spacing=5}; composer.Children.Add(prompt);
+        var actions=new StackPanel{Orientation=Orientation.Horizontal,Spacing=6};
+        actions.Children.Add(Action("Send",SendTask,"StartTask",true));
+        var options=new Button{Content="Options",Flyout=new Flyout{Content=auto}};
+        AutomationProperties.SetName(options,"Task options: automatic integration"); ToolTipService.SetToolTip(options,"Choose automatic validation and integration"); actions.Children.Add(options);
+        composer.Children.Add(actions); Grid.SetRow(composer,3); root.Children.Add(composer);
+        Content=root;
+        AutomationProperties.SetAutomationId(prompt,"TaskPrompt");
+        ToolTipService.SetToolTip(prompt,"Ctrl+N focuses this field. Ctrl+Enter sends this task.");
+        AutomationProperties.SetAutomationId(projectPath,"ProjectPath");
+        AutomationProperties.SetAutomationId(validation,"ValidationCommand");
+        root.SizeChanged+=(_,e)=>{wide=e.NewSize.Width>=1000; ArrangeDetails();};
+        Shortcut(VirtualKey.N,VirtualKeyModifiers.Control,()=>prompt.Focus(FocusState.Programmatic));
+        Shortcut(VirtualKey.Enter,VirtualKeyModifiers.Control,()=>{if(prompt.FocusState!=FocusState.Unfocused)_=Guard(SendTask);});
+        Shortcut(VirtualKey.Escape,VirtualKeyModifiers.None,()=>{detailsOpen=false; ArrangeDetails(); notice.IsOpen=false;});
+        AppWindow.Closing+=async (_,e)=>{if(closing)return; e.Cancel=true; closing=true; timer.Stop(); if(runtime!=null)await runtime.DisposeAsync(); Close();};
+        timer.Tick+=(_,_)=>Refresh(); timer.Start();
+        root.Loaded+=async (_,_)=>await Guard(Initialize);
+    }
+    void Shortcut(VirtualKey key,VirtualKeyModifiers modifiers,Action action)
+    {var a=new KeyboardAccelerator{Key=key,Modifiers=modifiers}; a.Invoked+=(_,e)=>{action();e.Handled=true;}; root.KeyboardAccelerators.Add(a);}
+    async Task Initialize()
+    {
+        var args=Environment.GetCommandLineArgs();
+        for(int i=1;i+1<args.Length;i++){if(args[i]=="--project")projectPath.Text=args[++i];else if(args[i]=="--data-root")dataRoot=args[++i];}
+        if(string.IsNullOrWhiteSpace(projectPath.Text)&&File.Exists(settings))
+        {using var doc=JsonDocument.Parse(await File.ReadAllTextAsync(settings));
+         if(doc.RootElement.TryGetProperty("project",out var p))projectPath.Text=p.GetString()??"";
+         if(dataRoot==null&&doc.RootElement.TryGetProperty("dataRoot",out var d))dataRoot=d.GetString();}
+        if(Directory.Exists(projectPath.Text))await OpenProject();else await ShowSettings();
+    }
+    async Task OpenProject()
+    {
+        if(runtime?.Snapshot.Work.Any(x=>x.IsActive)==true)throw new InvalidOperationException("Finish or cancel active tasks before switching projects.");
+        if(runtime!=null){await runtime.DisposeAsync();runtime=null;}
+        runtime=await ProjectRuntime.OpenAsync(projectPath.Text,dataRoot); snapshot=runtime.Snapshot;
+        validation.Text=snapshot.ValidationCommand;
+        if(string.IsNullOrWhiteSpace(validation.Text)&&File.Exists(Path.Combine(snapshot.ProjectPath,"Validate.ps1")))validation.Text=PracticeProject.ValidateCommand;
+        projectName.Text=snapshot.ProjectName;
+        Directory.CreateDirectory(Path.GetDirectoryName(settings)!);
+        await File.WriteAllTextAsync(settings,JsonSerializer.Serialize(new{project=snapshot.ProjectPath,dataRoot=dataRoot==null?null:Path.GetFullPath(dataRoot)}));
+        rows.Clear();tree.Children.Clear();selected=null;detailsOpen=false;generation=-1;Refresh();
+        if(string.IsNullOrWhiteSpace(snapshot.ValidationCommand))Notice("Project opened","Set and save its validation command in Settings.");
     }
 
-    private async Task Initialize()
+    async Task ShowSettings()
     {
-        var args = Environment.GetCommandLineArgs();
-        for (var i = 1; i + 1 < args.Length; i++)
-        { if (args[i] == "--project") _projectPath.Text = args[++i]; else if (args[i] == "--data-root") _dataRoot = args[++i]; }
-        if (string.IsNullOrWhiteSpace(_projectPath.Text) && File.Exists(_settings))
-        {
-            using var doc = JsonDocument.Parse(await File.ReadAllTextAsync(_settings));
-            if (doc.RootElement.TryGetProperty("project", out var p)) _projectPath.Text = p.GetString() ?? "";
-            if (_dataRoot == null && doc.RootElement.TryGetProperty("dataRoot", out var d)) _dataRoot = d.GetString();
-        }
-        await CheckPrerequisites();
-        if (Directory.Exists(_projectPath.Text)) await OpenProject();
+        var body=new StackPanel{Spacing=12};
+        body.Children.Add(projectPath);
+        body.Children.Add(Row(Action("Browse…",Browse,"BrowseProject"),Action("Open project",OpenProject,"OpenProject")));
+        body.Children.Add(validation);
+        body.Children.Add(Action("Save setup",()=>{RequireRuntime().Configure(validation.Text,HostDiscovery.FindCodex());Notice("Setup saved","Validation command saved.");return Task.CompletedTask;},"SaveSetup"));
+        body.Children.Add(Label("A local Git project, Git, and an authenticated Codex CLI are required. Tasks start from committed state.",12));
+        var checks=new StackPanel{Spacing=5};
+        body.Children.Add(new Expander{Header="Prerequisites",Content=checks});
+        body.Children.Add(Action("Check prerequisites",async()=>{checks.Children.Clear();foreach(var c in await HostDiscovery.CheckAsync())checks.Children.Add(Label((c.Ready?"Ready: ":"Action needed: ")+c.Name+" — "+c.Detail,12));},"CheckPrerequisites"));
+        var advanced=new StackPanel{Spacing=8};
+        advanced.Children.Add(Label(ProjectRuntime.Coverage,12));
+        advanced.Children.Add(Action("Create practice project",CreatePractice,"CreatePractice"));
+        advanced.Children.Add(Action("Run concurrency check",Walkthrough,"RunWalkthrough"));
+        advanced.Children.Add(Action("Open evidence folder",()=>OpenPath(RequireRuntime().DataDirectory),"OpenEvidenceFolder"));
+        advanced.Children.Add(Action("Open project folder",()=>OpenPath(RequireRuntime().Snapshot.ProjectPath),"OpenProjectFolder"));
+        body.Children.Add(new Expander{Header="Advanced: coverage, practice and concurrency",Content=advanced});
+        var dialog=new ContentDialog{Title="Project settings",Content=new ScrollViewer{Content=body,MaxHeight=540,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled},CloseButtonText="Close",XamlRoot=root.XamlRoot};
+        await dialog.ShowAsync();
     }
-    private async Task CheckPrerequisites()
+    async Task Browse()
+    {var picker=new FolderPicker();picker.FileTypeFilter.Add("*");WinRT.Interop.InitializeWithWindow.Initialize(picker,WinRT.Interop.WindowNative.GetWindowHandle(this));var folder=await picker.PickSingleFolderAsync();if(folder!=null)projectPath.Text=folder.Path;}
+    async Task CreatePractice()
+    {projectPath.Text=await PracticeProject.CreateAsync(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"AgentOS","practice"));await OpenProject();validation.Text=PracticeProject.ValidateCommand;RequireRuntime().Configure(validation.Text);Notice("Practice project ready","Run the concurrency check from Advanced settings.");}
+    async Task Walkthrough()
     {
-        _prerequisites.Children.Clear(); _prerequisites.Children.Add(Text("Checking this machine…", 13));
-        var checks = await HostDiscovery.CheckAsync(); _prerequisites.Children.Clear();
-        foreach (var check in checks)
+        if(walkthrough)throw new InvalidOperationException("The concurrency check is already running.");
+        if(!File.Exists(Path.Combine(RequireRuntime().Snapshot.ProjectPath,"settings.json"))||!RequireRuntime().Snapshot.ProjectName.StartsWith("coordination-"))throw new InvalidOperationException("Create a practice project first.");
+        walkthrough=true;
+        try{await PracticeProject.RunWalkthroughAsync(RequireRuntime(),message=>DispatcherQueue.TryEnqueue(()=>Notice("Concurrency check",message)));}
+        finally{walkthrough=false;}
+    }
+    async Task SendTask()
+    {var value=prompt.Text;var id=await Commands.Start(value,auto.IsChecked==true);prompt.Text="";selected=id;Refresh();}
+    async Task SendFollowUp(string parentId,string value)
+    {var id=await Commands.Start(value,auto.IsChecked==true,parentId);rows[parentId].ClearReply();selected=id;Refresh();}
+    void Refresh()
+    {
+        if(runtime==null)return;
+        var state=runtime.Snapshot;if(state.Generation==generation)return;
+        generation=state.Generation;snapshot=state;
+        var pending=state.Decisions.Count(x=>x.Status==DecisionStatus.Pending);
+        summary.Text=$"{state.Work.Count(x=>x.IsActive)} active · {state.Work.Count(x=>x.Status==WorkStatus.Completed)} completed";
+        AutomationProperties.SetLiveSetting(summary,AutomationLiveSetting.Polite);
+        decisions.Content=pending==0?"Decisions":$"Decisions ({pending})";decisions.IsEnabled=pending>0;
+        var scrollOffset=map.VerticalOffset;
+        var live=state.Work.Select(x=>x.Id).ToHashSet();
+        foreach(var id in rows.Keys.Where(x=>!live.Contains(x)).ToArray())
+        {var row=rows[id];if(row.Root.Parent is Panel p)p.Children.Remove(row.Root);rows.Remove(id);}
+        foreach(var work in state.Work)
         {
-            var panel = new StackPanel { Spacing = 3 };
-            panel.Children.Add(Text((check.Ready ? "✓  " : "!  ") + check.Name + (check.Ready ? " · ready" : " · action needed"), 14, true));
-            panel.Children.Add(Text(check.Detail, 12)); _prerequisites.Children.Add(panel);
+            if(!rows.TryGetValue(work.Id,out var row))
+            {row=new TaskRow(work.Id,id=>OpenDetails(id),(id,value)=>Guard(()=>SendFollowUp(id,value)),id=>Guard(()=>{Commands.Stop(id);return Task.CompletedTask;}),id=>Guard(()=>ShowWorkDecision(id)),()=>RowMenu(work.Id));rows.Add(work.Id,row);}
+            row.Patch(work,state.Decisions.Any(x=>x.WorkId==work.Id&&x.Status==DecisionStatus.Pending));
         }
+        Reconcile(tree,state.Work.Where(x=>x.ParentId==null||!rows.ContainsKey(x.ParentId)).Reverse().Select(x=>x.Id).ToArray());
+        foreach(var work in state.Work){Reconcile(rows[work.Id].Children,state.Work.Where(x=>x.ParentId==work.Id).Select(x=>x.Id).ToArray());rows[work.Id].UpdateChildren();}
+        DispatcherQueue.TryEnqueue(()=>{if(Math.Abs(map.VerticalOffset-scrollOffset)>1)map.ChangeView(null,scrollOffset,null,true);});
+        if(detailsOpen){var shown=state.Work.FirstOrDefault(x=>x.Id==selected);if(shown!=null){detailHeading.Text=shown.StatusLabel+" · "+shown.ShortTask;detailStatus.Text=shown.Detail;}}
+    }
+    void Reconcile(StackPanel parent,string[] ids)
+    {
+        for(int i=0;i<ids.Length;i++)
+        {var target=rows[ids[i]].Root;
+         if(target.Parent is Panel old&&old!=parent)old.Children.Remove(target);
+         var current=parent.Children.IndexOf(target);if(current==i)continue;
+         if(current>=0)parent.Children.RemoveAt(current);
+         parent.Children.Insert(i,target);}
+    }
+    void OpenDetails(string id){selected=id;detailsOpen=true;DrawDetails();ArrangeDetails();}
+    void ArrangeDetails()
+    {
+        surface.ColumnDefinitions[0].Width=new GridLength(detailsOpen&&wide?0.55:1,GridUnitType.Star);
+        surface.ColumnDefinitions[1].Width=new GridLength(detailsOpen?(wide?0.45:1):0,GridUnitType.Star);
+        map.Visibility=detailsOpen&&!wide?Visibility.Collapsed:Visibility.Visible;
+        detail.Visibility=detailsOpen?Visibility.Visible:Visibility.Collapsed;
     }
 
-    private async Task OpenProject()
+    void DrawDetails()
     {
-        if (_runtime?.Snapshot.Work.Any(x => x.IsActive) == true) throw new InvalidOperationException("Cancel or finish active work before switching projects.");
-        if (_runtime != null) { await _runtime.DisposeAsync(); _runtime = null; }
-        _runtime = await ProjectRuntime.OpenAsync(_projectPath.Text, _dataRoot);
-        _snapshot = _runtime.Snapshot; _validation.Text = _snapshot.ValidationCommand;
-        if (string.IsNullOrWhiteSpace(_validation.Text) && File.Exists(Path.Combine(_snapshot.ProjectPath, "Validate.ps1"))) _validation.Text = PracticeProject.ValidateCommand;
-        _projectTitle.Text = _snapshot.ProjectName;
-        _projectSubtitle.Text = _snapshot.ProjectPath + "  ·  Shared result: agent-os/integrated";
-        _navProject.Text = _snapshot.ProjectName;
-        Directory.CreateDirectory(Path.GetDirectoryName(_settings)!);
-        await File.WriteAllTextAsync(_settings, JsonSerializer.Serialize(new { project = _snapshot.ProjectPath, dataRoot = _dataRoot == null ? null : Path.GetFullPath(_dataRoot) }));
-        _generation = -1; Refresh();
-        if (!string.IsNullOrWhiteSpace(_snapshot.ValidationCommand)) ShowPage("Workspace");
-        else Notice("Project opened", "Set its validation command below. Tasks start from committed Git state, not uncommitted editor changes.");
+        detailBody.Children.Clear();
+        var work=snapshot?.Work.FirstOrDefault(x=>x.Id==selected);if(work==null)return;
+        detailBody.Children.Add(Row(Action("Back",()=>{detailsOpen=false;ArrangeDetails();return Task.CompletedTask;},"BackToTasks"),Action("Refresh details",()=>{DrawDetails();return Task.CompletedTask;},"RefreshDetails")));
+        detailHeading.Text=work.StatusLabel+" · "+work.ShortTask;detailBody.Children.Add(detailHeading);
+        detailStatus.Text=work.Detail;detailBody.Children.Add(detailStatus);
+        if(work.ParentId!=null&&snapshot!.Work.FirstOrDefault(x=>x.Id==work.ParentId) is { } original)
+            detailBody.Children.Add(Action("Parent task",()=>{OpenDetails(original.Id);return Task.CompletedTask;},"OriginalTask"));
+        foreach(var child in snapshot!.Work.Where(x=>x.ParentId==work.Id))
+            detailBody.Children.Add(Action("Child task · "+child.StatusLabel,()=>{OpenDetails(child.Id);return Task.CompletedTask;},"RevisionTask"));
+        detailBody.Children.Add(Card("Full prompt",ReadOnly(work.Task,200)));
+        if(!string.IsNullOrWhiteSpace(work.CodexReport))detailBody.Children.Add(Card("Full report",ReadOnly(work.CodexReport,300)));
+        if(work.ChangedPaths.Count>0)detailBody.Children.Add(Card("Changed files",ReadOnly(string.Join(Environment.NewLine,work.ChangedPaths),160)));
+        if(!string.IsNullOrWhiteSpace(work.Diff))detailBody.Children.Add(Card("Candidate diff",ReadOnly(work.Diff,300)));
+        if(work.IntegratedCommit!=null)detailBody.Children.Add(Label("Integrated commit: "+work.IntegratedCommit,12));
+        foreach(var evidence in work.Evidence)
+        {var panel=new StackPanel{Spacing=5};
+         panel.Children.Add(Label($"{evidence.TestedAt.LocalDateTime:g} · exit {evidence.ExitCode} · {(evidence.Passed?"passed":"failed")}",12));
+         panel.Children.Add(ReadOnly($"Commit {evidence.Commit}\nTree {evidence.Tree}\nBased on {evidence.AgainstCommit}\n{evidence.Command}\n{evidence.Environment}",170));
+         panel.Children.Add(Action("Open validation log",()=>OpenPath(evidence.LogPath),"OpenValidationLog"));
+         detailBody.Children.Add(Card("Validation evidence",panel));}
+        detailBody.Children.Add(Label("Recent activity",15,true));
+        foreach(var entry in snapshot!.Events.Where(x=>x.WorkId==work.Id).TakeLast(20).Reverse())
+            detailBody.Children.Add(Label(entry.At.ToLocalTime().ToString("g")+" · "+entry.Message,12));
     }
-    private void ShowPage(string page)
+    MenuFlyout RowMenu(string id)
     {
-        foreach (var element in new UIElement[] { _projectPath, _validation, _prompt, _auto, _workList, _details, _prerequisites, _decisions, _evidence }) Detach(element);
-        _activePage = page;
-        if (_runtime == null && page != "Setup") { _activePage = "Setup"; Notice("Open a project first", "Choose a local Git project or create a practice project to get started."); }
-        foreach (var button in _navigation.Children.OfType<Button>())
-        { var active = (string)button.Content == _activePage; button.Background = active ? Accent : new SolidColorBrush(Colors.Transparent); button.Foreground = active ? new SolidColorBrush(Colors.White) : Ink; }
-        _page.Content = _activePage switch { "Workspace" => WorkspacePage(), "Decisions" => Scroll(_decisions), "Evidence" => Scroll(_evidence), _ => SetupPage() };
-        Refresh(true);
+        var menu=new MenuFlyout();var work=snapshot?.Work.FirstOrDefault(x=>x.Id==id);if(work==null)return menu;
+        void Add(string title,Func<Task> action,string automationId)
+        {var item=new MenuFlyoutItem{Text=title};AutomationProperties.SetAutomationId(item,automationId);item.Click+=async(_,_)=>await Guard(action);menu.Items.Add(item);}
+        if(work.IsActive)Add("Stop task",()=>{Commands.Stop(id);return Task.CompletedTask;},"CancelTask");
+        if(work.Status==WorkStatus.Private)Add("Integrate candidate",()=>Commands.Integrate(id),"IntegrateCandidate");
+        if(!work.IsActive)Add("Revise with Codex",async()=>{selected=await Commands.Revise(id);Refresh();},"ReviseTask");
+        if(work.Status==WorkStatus.Completed)Add("Prepare release decision",async()=>{await Commands.PrepareRelease(id);Refresh();},"PrepareRelease");
+        if(Directory.Exists(work.Workspace))Add("Open private files",()=>OpenPath(work.Workspace),"OpenPrivate");
+        Add("Open transcript",()=>OpenPath(Commands.Transcript(id)),"OpenTranscript");
+        if(File.Exists(Commands.Diagnostics(id)))Add("Runtime diagnostics",()=>OpenPath(Commands.Diagnostics(id)),"OpenDiagnostics");
+        if(!work.IsActive&&!work.WorkspaceRemoved)Add("Clean private files",()=>Commands.Cleanup(id),"CleanupTask");
+        return menu;
     }
-
-    private UIElement SetupPage()
+    void ShowDecisionMenu()
     {
-        var stack = new StackPanel { Spacing = 20, MaxWidth = 860, HorizontalAlignment = HorizontalAlignment.Left };
-        stack.Children.Add(Text("Project setup", 22, true));
-        stack.Children.Add(Text("Give Codex a project and a way to validate its work. Each task starts in a private clone of the shared result.", 14));
-        stack.Children.Add(_projectPath);
-        stack.Children.Add(Row(Button("Browse…", Browse, "BrowseProject"), Button("Open project", OpenProject, "OpenProject", true), Button("Create practice project", CreatePractice, "CreatePractice")));
-        stack.Children.Add(_validation);
-        stack.Children.Add(Text("This command runs on the combined candidate before integration. It must exit with a nonzero code on failure. Validation has a 15 minute limit. Run only trusted project commands.", 12));
-        stack.Children.Add(Row(Button("Save setup", () => { RequireRuntime().Configure(_validation.Text, HostDiscovery.FindCodex()); Notice("Setup saved", "Codex tasks will use this validation command."); ShowPage("Workspace"); return Task.CompletedTask; }, "SaveSetup", true), Button("Check prerequisites", CheckPrerequisites, "CheckPrerequisites")));
-        stack.Children.Add(Card("Mediation for this configuration", Text(ProjectRuntime.Coverage, 13)));
-        stack.Children.Add(Card("Prerequisites", _prerequisites));
-        stack.Children.Add(Text("The app bundles .NET and the Windows App SDK. Git and an authenticated Codex CLI are required to start work. Model and account settings come from your Codex configuration. Host failures never fall back to an unconfined launch.", 12));
-        return Scroll(stack);
-    }
-    private async Task Browse()
-    {
-        var picker = new FolderPicker(); picker.FileTypeFilter.Add("*");
-        WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(this));
-        var folder = await picker.PickSingleFolderAsync(); if (folder != null) _projectPath.Text = folder.Path;
-    }
-    private async Task CreatePractice()
-    {
-        _projectPath.Text = await PracticeProject.CreateAsync(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AgentOS", "practice"));
-        await OpenProject(); _validation.Text = PracticeProject.ValidateCommand;
-        RequireRuntime().Configure(_validation.Text); ShowPage("Workspace");
-        Notice("Practice project ready", "Use Run concurrency check to exercise real Codex tasks, a stale candidate, independent work, and a scoped decision.");
-    }
-
-    private UIElement WorkspacePage()
-    {
-        var grid = new Grid { RowSpacing = 16 };
-        grid.RowDefinitions.Add(new() { Height = GridLength.Auto }); grid.RowDefinitions.Add(new() { Height = new GridLength(1, GridUnitType.Star) });
-        var compose = new StackPanel { Spacing = 10 };
-        compose.Children.Add(_prompt);
-        compose.Children.Add(Row(Button("Start Codex task", StartTask, "StartTask", true), _auto, Button("Run concurrency check", Walkthrough, "RunWalkthrough")));
-        grid.Children.Add(compose);
-        var split = new Grid { ColumnSpacing = 10 };
-        split.ColumnDefinitions.Add(new() { Width = new GridLength(0.38, GridUnitType.Star) });
-        split.ColumnDefinitions.Add(new() { Width = new GridLength(0.62, GridUnitType.Star) });
-        var listPanel = new Grid { RowSpacing = 10 };
-        listPanel.RowDefinitions.Add(new() { Height = GridLength.Auto }); listPanel.RowDefinitions.Add(new() { Height = new GridLength(1, GridUnitType.Star) });
-        listPanel.Children.Add(Text("Task map", 16, true)); Grid.SetRow(_workList, 1); listPanel.Children.Add(_workList);
-        split.Children.Add(listPanel);
-        var detailBorder = new Border { Background = new SolidColorBrush(Colors.White), BorderBrush = Line, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(8), Child = Scroll(_details) };
-        Grid.SetColumn(detailBorder, 1); split.Children.Add(detailBorder); Grid.SetRow(split, 1); grid.Children.Add(split);
-        return grid;
-    }
-    private async Task StartTask()
-    {
-        var runtime = RequireRuntime();
-        _selected = await runtime.StartAsync(_prompt.Text, _auto.IsChecked == true);
-        _prompt.Text = ""; Refresh(true);
-    }
-    private async Task Walkthrough()
-    {
-        if (_walkthrough) throw new InvalidOperationException("The concurrency check is already running.");
-        if (!File.Exists(Path.Combine(RequireRuntime().Snapshot.ProjectPath, "settings.json")) || !RequireRuntime().Snapshot.ProjectName.StartsWith("coordination-"))
-            throw new InvalidOperationException("Create a practice project in Setup to run the concurrency check.");
-        _walkthrough = true;
-        try { await PracticeProject.RunWalkthroughAsync(RequireRuntime(), text => DispatcherQueue.TryEnqueue(() => Notice("Concurrency check", text))); Notice("Concurrency check complete", "Review the integrated work, stale attempt, Codex revision, and pending local release decision."); }
-        finally { _walkthrough = false; }
-    }
-
-    private void Refresh(bool force = false)
-    {
-        if (_runtime == null) return;
-        var state = _runtime.Snapshot;
-        if (!force && state.Generation == _generation) return;
-        _generation = state.Generation; _snapshot = state;
-        _counts.Text = $"{state.Work.Count(x => x.IsActive)} active · {state.Work.Count(x => x.Status == WorkStatus.Completed)} integrated\n{state.Decisions.Count(x => x.Status == DecisionStatus.Pending)} decisions waiting";
-        _rebuilding = true;
-        _workList.Items.Clear();
-        foreach (var (work, depth) in TaskMap(state.Work))
+        var menu=new MenuFlyout();
+        foreach(var choice in snapshot?.Decisions.Where(x=>x.Status==DecisionStatus.Pending).Reverse()??[])
         {
-            var panel = new StackPanel { Spacing = 7, Padding = new Thickness(6, 10, 6, 10) };
-            var status = Text(work.StatusLabel.ToUpperInvariant(), 10, true); status.Foreground = StatusBrush(work.Status);
-            panel.Children.Add(status); panel.Children.Add(Text(work.ShortTask, 14, true));
-            panel.Children.Add(Text(work.IsActive || work.Status is WorkStatus.Stale or WorkStatus.Failed or WorkStatus.Unknown ? work.Detail :
-                work.Status == WorkStatus.Completed ? "Validated · available in the shared result" : work.Status == WorkStatus.Private ? "Ready for validation · files remain private" : "Stopped · private output retained", 12));
-            var pending = state.Decisions.Count(x => x.WorkId == work.Id && x.Status == DecisionStatus.Pending);
-            if (pending > 0) { var decision = Text("Release decision pending", 12, true); decision.Foreground = StatusBrush(WorkStatus.Stale); panel.Children.Add(decision); }
-            panel.Children.Add(Text(work.CreatedAt.ToLocalTime().ToString("HH:mm") + " · Codex" + (work.ParentId == null ? "" : " · revision"), 11));
-            var content = new Border { Child = panel, Margin = new Thickness(Math.Min(depth, 3) * 12, 0, 0, 0), BorderBrush = Line, BorderThickness = new Thickness(depth > 0 ? 2 : 0, 0, 0, 0) };
-            var item = new ListViewItem { Tag = work.Id, Content = content, HorizontalContentAlignment = HorizontalAlignment.Stretch };
-            AutomationProperties.SetName(item, (depth > 0 ? "Revision · " : "") + work.StatusLabel + ": " + work.ShortTask);
-            _workList.Items.Add(item); if (work.Id == _selected) _workList.SelectedItem = item;
+            var item=new MenuFlyoutItem{Text=(snapshot?.Work.FirstOrDefault(x=>x.Id==choice.WorkId)?.ShortTask??"Task")+" · "+choice.Candidate[..Math.Min(8,choice.Candidate.Length)]};
+            item.Click+=async(_,_)=>await Guard(()=>ShowDecision(choice.Id));menu.Items.Add(item);
         }
-        if (_selected == null && _workList.Items.Count > 0) { _workList.SelectedIndex = 0; _selected = (string)((ListViewItem)_workList.SelectedItem).Tag; }
-        _rebuilding = false;
-        DrawDetails(); DrawDecisions(); DrawEvidence();
+        menu.ShowAt(decisions);
     }
-
-    private void DrawDetails()
+    Task ShowWorkDecision(string workId)
+    {var decision=snapshot?.Decisions.LastOrDefault(x=>x.WorkId==workId&&x.Status==DecisionStatus.Pending);return decision==null?Task.CompletedTask:ShowDecision(decision.Id);}
+    async Task ShowDecision(string decisionId)
     {
-        _details.Children.Clear();
-        var work = _snapshot?.Work.FirstOrDefault(x => x.Id == _selected);
-        if (work == null)
-        {
-            _details.Children.Add(Text("Room to work", 23, true));
-            _details.Children.Add(Text("Start a Codex task above. You can launch another while it works. Their files and Git indexes remain private until validated integration.", 14));
-            _details.Children.Add(Text("You will see waiting, failed, stale, and unknown outcomes here, along with the evidence behind completed work.", 13)); return;
-        }
-        var label = Text(work.StatusLabel, 13, true); label.Foreground = StatusBrush(work.Status); _details.Children.Add(label);
-        _details.Children.Add(Text(work.ShortTask, 20, true));
-        _details.Children.Add(Text(work.Detail, 14));
-        if (work.Status == WorkStatus.Waiting)
-            _details.Children.Add(Card("Waiting for shared publication", Text("This candidate resumes when the current publication finishes. Changed files are checked again against the latest shared version, then the combined result is tested. Other Codex work can continue. Cancel removes this candidate from the queue.", 13)));
-        if (work.ParentId != null || _snapshot!.Work.Any(x => x.ParentId == work.Id))
-        {
-            var related = new StackPanel { Spacing = 8 };
-            if (work.ParentId != null)
-            {
-                var parent = _snapshot!.Work.FirstOrDefault(x => x.Id == work.ParentId);
-                if (parent != null) related.Children.Add(Button("Original task · " + parent.StatusLabel, () => SelectWork(parent.Id), "OriginalTask"));
-            }
-            foreach (var child in _snapshot!.Work.Where(x => x.ParentId == work.Id))
-                related.Children.Add(Button("Revision · " + child.StatusLabel, () => SelectWork(child.Id), "RevisionTask"));
-            related.Children.Add(Text("Each attempt keeps its own outcome and evidence. A revision does not change the earlier record.", 12));
-            _details.Children.Add(Card("Task thread", related));
-        }
-        if (_snapshot!.Decisions.Any(x => x.WorkId == work.Id && x.Status == DecisionStatus.Pending))
-            _details.Children.Add(Button("Review pending release decision", () => { ShowPage("Decisions"); return Task.CompletedTask; }, "TaskDecision"));
-        var actions = new FlowPanel();
-        if (work.IsActive) actions.Children.Add(Button("Cancel task", () => { RequireRuntime().Cancel(work.Id); return Task.CompletedTask; }, "CancelTask"));
-        if (work.Status == WorkStatus.Private) actions.Children.Add(Button("Integrate candidate", () => RequireRuntime().IntegrateAsync(work.Id), "IntegrateCandidate", true));
-        if (!work.IsActive) actions.Children.Add(Button("Revise with Codex", async () => { _selected = await RequireRuntime().ReviseAsync(work.Id); Refresh(true); }, "ReviseTask"));
-        if (work.Status == WorkStatus.Completed) actions.Children.Add(Button("Prepare release decision", async () => { await RequireRuntime().RequestReleaseAsync(work.Id); ShowPage("Decisions"); }, "PrepareRelease", true));
-        _details.Children.Add(actions);
-        var files = new FlowPanel();
-        if (Directory.Exists(work.Workspace)) files.Children.Add(Button("Open private files", () => OpenPath(work.Workspace), "OpenPrivate"));
-        files.Children.Add(Button("Open transcript", () => OpenPath(RequireRuntime().TranscriptPath(work.Id)), "OpenTranscript"));
-        if (File.Exists(RequireRuntime().DiagnosticsPath(work.Id))) files.Children.Add(Button("Runtime diagnostics", () => OpenPath(RequireRuntime().DiagnosticsPath(work.Id)), "OpenDiagnostics"));
-        if (!work.IsActive && !work.WorkspaceRemoved) files.Children.Add(Button("Clean private files", () => RequireRuntime().CleanupAsync(work.Id), "CleanupTask"));
-        _details.Children.Add(files);
-        if (!string.IsNullOrWhiteSpace(work.CodexReport))
-        {
-            var report = new Expander { Header = "Codex report", HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch, Content = Code(work.CodexReport, 320) };
-            AutomationProperties.SetAutomationId(report, "CodexReport"); _details.Children.Add(report);
-        }
-        _details.Children.Add(new Expander { Header = "Full task", HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch, Content = Code(work.Task, 280) });
-        if (work.IntegratedCommit != null) _details.Children.Add(Card("Shared result", Text("Commit " + work.IntegratedCommit + "\nBranch agent-os/integrated\nInspect with: git show " + work.IntegratedCommit, 12)));
-        if (work.ChangedPaths.Count > 0) _details.Children.Add(Card("Changed files", Text(string.Join("\n", work.ChangedPaths), 13)));
-        if (!string.IsNullOrWhiteSpace(work.Diff)) _details.Children.Add(new Expander { Header = "Review candidate diff", HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch, Content = Code(work.Diff, 320) });
-        foreach (var evidence in work.Evidence) _details.Children.Add(EvidenceCard(evidence));
-        _details.Children.Add(Text("Recent activity", 15, true));
-        foreach (var entry in _snapshot!.Events.Where(x => x.WorkId == work.Id).TakeLast(12).Reverse())
-            _details.Children.Add(Text(entry.At.ToLocalTime().ToString("HH:mm:ss") + "  " + entry.Message, 12));
+        var decision=snapshot?.Decisions.FirstOrDefault(x=>x.Id==decisionId&&x.Status==DecisionStatus.Pending);if(decision==null)return;
+        var work=snapshot!.Work.FirstOrDefault(x=>x.Id==decision.WorkId);
+        var content=new StackPanel{Spacing=8};
+        content.Children.Add(Label(work?.ShortTask??"Task",16,true));
+        content.Children.Add(Label(decision.Explanation,13));
+        content.Children.Add(Card("Exact candidate and destination",ReadOnly(decision.Candidate+"\n"+decision.Destination,120)));
+        content.Children.Add(Card("Authority scope",ReadOnly(decision.Scope,120)));
+        if(work!=null)
+        {content.Children.Add(Card("Changed files",ReadOnly(string.Join(Environment.NewLine,work.ChangedPaths),100)));
+         content.Children.Add(Card("Diff",ReadOnly(work.Diff,180)));
+         foreach(var e in work.Evidence.Where(x=>x.Commit==decision.Candidate))
+            content.Children.Add(Card("Validation evidence",Label($"{e.Command} · exit {e.ExitCode} · {e.TestedAt.LocalDateTime:g}\n{e.LogPath}",12)));}
+        ContentDialog dialog=null!;
+        content.Children.Add(Action("Approve this local release",async()=>{await Commands.Decide(decision.Id,true);dialog.Hide();},"ApproveDecision"));
+        content.Children.Add(Action("Decline release",async()=>{await Commands.Decide(decision.Id,false);dialog.Hide();},"RejectDecision"));
+        dialog=new ContentDialog{Title="Review local release decision",Content=new ScrollViewer{Content=content,MaxHeight=540},CloseButtonText="Later",XamlRoot=root.XamlRoot};
+        AutomationProperties.SetAutomationId(dialog,"DecisionReview");
+        await dialog.ShowAsync();
+        Refresh();
     }
-
-    private Task SelectWork(string id) { _selected = id; Refresh(true); _workList.ScrollIntoView(_workList.SelectedItem); return Task.CompletedTask; }
-    private static IEnumerable<(WorkUnit Work, int Depth)> TaskMap(List<WorkUnit> work)
-    {
-        var seen = new HashSet<string>();
-        IEnumerable<(WorkUnit, int)> Branch(WorkUnit item, int depth)
-        {
-            if (!seen.Add(item.Id)) yield break;
-            yield return (item, depth);
-            foreach (var child in work.Where(x => x.ParentId == item.Id))
-                foreach (var row in Branch(child, depth + 1)) yield return row;
-        }
-        foreach (var root in work.Where(x => x.ParentId == null || !work.Any(p => p.Id == x.ParentId)).Reverse())
-            foreach (var row in Branch(root, 0)) yield return row;
-        foreach (var orphan in work.Where(x => !seen.Contains(x.Id)))
-            foreach (var row in Branch(orphan, 0)) yield return row;
-    }
-
-    private void DrawDecisions()
-    {
-        _decisions.Children.Clear(); _decisions.Children.Add(Text("Decisions", 22, true));
-        _decisions.Children.Add(Text("Only a specific authority or unresolved judgment belongs here. Waiting for another task does not require permission.", 14));
-        if (_snapshot?.Decisions.Count == 0) _decisions.Children.Add(Card("Nothing needs a decision", Text("Authorized work can continue. A completed task can prepare a reviewed local release candidate.", 13)));
-        foreach (var decision in _snapshot?.Decisions.AsEnumerable().Reverse() ?? [])
-        {
-            var content = new StackPanel { Spacing = 12 };
-            content.Children.Add(Text(decision.Status.ToString(), 12, true));
-            content.Children.Add(Text(decision.Explanation, 14));
-            content.Children.Add(Text("Authority: " + decision.Scope, 13));
-            content.Children.Add(Code("Candidate: " + decision.Candidate + "\nDestination: " + decision.Destination, 90));
-            if (decision.Note != null) content.Children.Add(Text(decision.Note, 13));
-            content.Children.Add(Button("Inspect candidate and evidence", () => { _selected = decision.WorkId; ShowPage("Workspace"); return Task.CompletedTask; }, "InspectDecision"));
-            if (decision.Status == DecisionStatus.Pending)
-                content.Children.Add(Row(Button("Approve this local release", () => RequireRuntime().DecideAsync(decision.Id, true), "ApproveDecision", true), Button("Decline release", () => RequireRuntime().DecideAsync(decision.Id, false), "RejectDecision")));
-            _decisions.Children.Add(Card("Designate a reviewed release", content));
-        }
-    }
-    private void DrawEvidence()
-    {
-        _evidence.Children.Clear(); _evidence.Children.Add(Text("Results & evidence", 22, true));
-        _evidence.Children.Add(Text("Passing results apply to the recorded candidate tree, validation command, and environment. A newer candidate needs its own validation.", 14));
-        _evidence.Children.Add(Row(Button("Open evidence folder", () => OpenPath(RequireRuntime().DataDirectory), "OpenEvidenceFolder"), Button("Open project folder", () => OpenPath(RequireRuntime().Snapshot.ProjectPath), "OpenProjectFolder")));
-        foreach (var work in _snapshot?.Work.AsEnumerable().Reverse() ?? [])
-            foreach (var evidence in work.Evidence) _evidence.Children.Add(Card(work.ShortTask, EvidenceCard(evidence)));
-        _evidence.Children.Add(Text("Effect history", 17, true));
-        foreach (var entry in _snapshot?.Events.Where(x => x.Kind != "Codex").TakeLast(80).Reverse() ?? [])
-            _evidence.Children.Add(Text(entry.At.ToLocalTime().ToString("HH:mm:ss") + " · " + entry.Kind + " · " + entry.Message, 12));
-    }
-    private UIElement EvidenceCard(ValidationEvidence e)
-    {
-        var content = new StackPanel { Spacing = 8 };
-        content.Children.Add(Text(e.TestedAt.ToLocalTime().ToString("g") + " · exit " + e.ExitCode + " · " + (e.SourceUnchanged ? "source unchanged" : "source changed"), 12));
-        content.Children.Add(Code("Commit " + e.Commit + "\nTree " + e.Tree + "\nBased on " + e.AgainstCommit + "\n" + e.Command, 125));
-        content.Children.Add(Text(e.Environment, 12));
-        content.Children.Add(Button("Open validation log", () => OpenPath(e.LogPath), "OpenValidationLog"));
-        return Card(e.Passed ? "Validation passed" : "Validation failed", content);
-    }
-    private ProjectRuntime RequireRuntime() => _runtime ?? throw new InvalidOperationException("Open a project in Setup first.");
-    private static Task OpenPath(string path)
-    {
-        if (!File.Exists(path) && !Directory.Exists(path)) throw new FileNotFoundException("This artifact is not available yet.", path);
-        if (Directory.Exists(path)) Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
-        else
-        {
-            var editor = new ProcessStartInfo("notepad.exe") { UseShellExecute = false };
-            editor.ArgumentList.Add(path); Process.Start(editor);
-        }
-        return Task.CompletedTask;
-    }
-    private void Notice(string title, string message, bool error = false)
-    { _notice.Title = title; _notice.Message = message; _notice.Severity = error ? InfoBarSeverity.Error : InfoBarSeverity.Informational; _notice.IsOpen = true; }
-    private async Task Guard(Func<Task> action)
-    { try { await action(); Refresh(true); } catch (Exception e) { Notice("Could not complete this action", e.Message, true); } }
-    private Button Button(string text, Func<Task> action, string automationId, bool primary = false)
-    {
-        var button = new Button { Content = text, Padding = new Thickness(13, 9, 13, 9) };
-        if (primary) { button.Background = Accent; button.Foreground = new SolidColorBrush(Colors.White); }
-        AutomationProperties.SetAutomationId(button, automationId);
-        button.Click += async (_, _) => { button.IsEnabled = false; try { await Guard(action); } finally { button.IsEnabled = true; } };
-        return button;
-    }
-    private static Panel Row(params UIElement[] elements)
-    { var panel = new FlowPanel(); foreach (var e in elements) panel.Children.Add(e); return panel; }
-    private static TextBlock Text(string text, double size = 14, bool bold = false) => new()
-    { Text = text, FontSize = size, FontWeight = bold ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal,
-        Foreground = bold ? Ink : Muted, TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true };
-    private static TextBox Code(string text, double maxHeight) => new() { AcceptsReturn = true, IsReadOnly = true, TextWrapping = TextWrapping.Wrap, FontFamily = new FontFamily("Cascadia Mono, Consolas"), FontSize = 12, MaxHeight = maxHeight, Text = text.ReplaceLineEndings("\r\n") };
-    private static ScrollViewer Scroll(UIElement child) => new() { Content = child, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalContentAlignment = HorizontalAlignment.Stretch };
-    private static Border Card(string title, UIElement content)
-    { var panel = new StackPanel { Spacing = 10 }; panel.Children.Add(Text(title, 15, true)); panel.Children.Add(content); return new() { Child = panel, Background = new SolidColorBrush(Colors.White), BorderBrush = Line, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(7), Padding = new Thickness(18) }; }
-    private static SolidColorBrush StatusBrush(WorkStatus status) => status switch { WorkStatus.Completed => Accent, WorkStatus.Failed => Brush(0xA3, 0x28, 0x28), WorkStatus.Stale or WorkStatus.Unknown => Brush(0x87, 0x55, 0x0D), _ => Muted };
-    private static SolidColorBrush Brush(byte r, byte g, byte b) => new(Windows.UI.Color.FromArgb(255, r, g, b));
-    private static void Detach(UIElement element)
-    {
-        switch (VisualTreeHelper.GetParent(element))
-        {
-            case Panel panel: panel.Children.Remove(element); break;
-            case Border border: border.Child = null; break;
-            case ScrollViewer scroll: scroll.Content = null; break;
-            case ContentControl content: content.Content = null; break;
-        }
-    }
+    static void Detach(UIElement element){if(Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(element) is Panel panel)panel.Children.Remove(element);}
+    RuntimeUiCommands Commands=>new(RequireRuntime());
+    ProjectRuntime RequireRuntime()=>runtime??throw new InvalidOperationException("Open a project in Settings first.");
+    static Task OpenPath(string path)
+    {if(!File.Exists(path)&&!Directory.Exists(path))throw new FileNotFoundException("This artifact is not available yet.",path);
+     if(Directory.Exists(path))Process.Start(new ProcessStartInfo(path){UseShellExecute=true});
+     else{var editor=new ProcessStartInfo("notepad.exe"){UseShellExecute=false};editor.ArgumentList.Add(path);Process.Start(editor);}
+     return Task.CompletedTask;}
+    void Notice(string title,string message,bool error=false)
+    {notice.Title=title;notice.Message=message;notice.Severity=error?InfoBarSeverity.Error:InfoBarSeverity.Informational;notice.IsOpen=true;}
+    async Task Guard(Func<Task> action)
+    {try{await action();Refresh();}catch(Exception e){Notice("Could not complete this action",e.Message,true);}}
+    Button Action(string title,Func<Task> action,string id,bool primary=false)
+    {var button=new Button{Content=title};if(primary)button.Style=Application.Current.Resources["AccentButtonStyle"] as Style;
+     AutomationProperties.SetAutomationId(button,id);AutomationProperties.SetName(button,title);
+     ToolTipService.SetToolTip(button,id=="StartTask"?"Send task (Ctrl+Enter)":id=="BackToTasks"?"Back to tasks (Escape)":title);
+     button.Click+=async(_,_)=>{button.IsEnabled=false;try{await Guard(action);}finally{button.IsEnabled=true;}};return button;}
+    static StackPanel Row(params UIElement[] children)
+    {var row=new StackPanel{Orientation=Orientation.Horizontal,Spacing=6};foreach(var child in children)row.Children.Add(child);return row;}
+    internal static TextBlock Label(string value,double size=14,bool bold=false)=>new()
+    {Text=value,FontSize=size,TextWrapping=TextWrapping.Wrap,IsTextSelectionEnabled=true,FontFamily=new FontFamily("Segoe UI"),FontWeight=bold?Microsoft.UI.Text.FontWeights.SemiBold:Microsoft.UI.Text.FontWeights.Normal};
+    static TextBox ReadOnly(string value,double height)=>new()
+    {Text=value.ReplaceLineEndings("\r\n"),IsReadOnly=true,AcceptsReturn=true,TextWrapping=TextWrapping.Wrap,MaxHeight=height,FontFamily=new FontFamily("Consolas")};
+    static Border Card(string title,UIElement content)
+    {var stack=new StackPanel{Spacing=5};stack.Children.Add(Label(title,13,true));stack.Children.Add(content);return new Border{Child=stack,Padding=new Thickness(10),CornerRadius=new CornerRadius(6),BorderThickness=new Thickness(1),Background=Application.Current.Resources["CardBackgroundFillColorDefaultBrush"] as Brush,BorderBrush=Application.Current.Resources["CardStrokeColorDefaultBrush"] as Brush};}
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
