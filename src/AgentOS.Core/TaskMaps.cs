@@ -2,7 +2,7 @@ using System.Security.Cryptography;
 namespace AgentOS.Core;
 public enum MapStatus { Draft, Active, Completed, Canceled }
 public enum MapEdgeKind { Dependency, Related, Followup }
-public enum MapTaskStatus { Draft, Ready, Running, Completed, Failed, Canceled, Private, Waiting, Stale, Unknown, Validating }
+public enum MapTaskStatus { Draft, Ready, Running, Completed, Failed, Canceled, Private, Waiting, Stale, Unknown, Validating, NeedsResponse, Parked, Abandoned }
 public sealed class TaskMap
 {
  public string Id { get; set; } = Guid.NewGuid().ToString("N");
@@ -148,6 +148,9 @@ public sealed partial class ProjectRuntime
      WorkStatus.Waiting => MapTaskStatus.Waiting,
      WorkStatus.Validating => MapTaskStatus.Validating,
      WorkStatus.Stale => MapTaskStatus.Stale,
+     WorkStatus.NeedsResponse => MapTaskStatus.NeedsResponse,
+     WorkStatus.Parked => MapTaskStatus.Parked,
+     WorkStatus.Abandoned => MapTaskStatus.Abandoned,
      WorkStatus.Unknown => MapTaskStatus.Unknown,
      WorkStatus.Failed => MapTaskStatus.Failed,
      WorkStatus.Canceled => MapTaskStatus.Canceled,

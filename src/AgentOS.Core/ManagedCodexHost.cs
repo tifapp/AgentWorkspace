@@ -10,6 +10,7 @@ internal sealed class ManagedCodexHost : IWorkHost
 {
     internal TaskInteractionStore? Interactions { get; set; }
     internal ProjectRuntime? Runtime { get; set; }
+    internal static object TurnParameters(string threadId, string text) => new { threadId, input = new[] { new { type = "text", text } } };
     internal static object SteeringParameters(string threadId, string turnId, string text) => new { threadId, expectedTurnId = turnId, input = new[] { new { type = "text", text } } };
     public async Task<string> Version(string executable)
     {
@@ -65,7 +66,43 @@ internal sealed class ManagedCodexHost : IWorkHost
             string result; bool success;
             try
             {
-                if (name == "agent_os_clarify")
+                if (name == "respond_to_conflict")
+                {
+                    var a = p.GetProperty("arguments");
+                    var n = Runtime!.RespondToConflict(work.Id, a.GetProperty("conflictId").GetString()!, a.GetProperty("explanation").GetString()!);
+                    result = "Recorded response to conflict " + n.Id + ". Deferred work remains unresolved."; success = true;
+                }
+                else if (name == "agent_os_resolve_conflict")
+                {
+                    var a = p.GetProperty("arguments");
+                    var n = Runtime!.ResolveConflict(work.Id, a.GetProperty("conflictId").GetString()!, a.GetProperty("explanation").GetString()!);
+                    result = "Requested validated publication of reconciled content for " + n.Id; success = true;
+                }
+                else if (name == "agent_os_abandon_conflict")
+                {
+                    var a = p.GetProperty("arguments");
+                    var n = Runtime!.AbandonConflict(work.Id, a.GetProperty("conflictId").GetString()!, a.GetProperty("explanation").GetString()!);
+                    result = "Explicitly abandoned " + n.Id; success = true;
+                }
+                else if (name == "agent_os_message_peer")
+                {
+                    var a = p.GetProperty("arguments");
+                    var item = Runtime!.SendPeerMessage(work.Id, a.GetProperty("targetWorkId").GetString()!, a.GetProperty("message").GetString()!);
+                    result = "Queued peer message " + item.Id; success = true;
+                }
+                else if (name == "agent_os_interrupt")
+                {
+                    var a = p.GetProperty("arguments");
+                    var item = Runtime!.InterruptManagedTask(work.Id, a.GetProperty("targetWorkId").GetString()!, a.GetProperty("reason").GetString()!);
+                    result = "Requested exact managed task interrupt " + item.Id; success = true;
+                }
+                else if (name == "agent_os_escalate")
+                {
+                    var a = p.GetProperty("arguments");
+                    var item = Runtime!.EscalateConflict(work.Id, a.GetProperty("conflictId").GetString()!, a.GetProperty("explanation").GetString()!);
+                    result = "Visible human escalation " + item.Id + " recorded."; success = true;
+                }
+                else if (name == "agent_os_clarify")
                 {
                     var arguments = p.GetProperty("arguments");
                     if (string.IsNullOrWhiteSpace(arguments.GetProperty("question").GetString()) || string.IsNullOrWhiteSpace(arguments.GetProperty("scope").GetString())) throw new ArgumentException("Clarification question and scope are required.");
@@ -181,7 +218,8 @@ internal sealed class ManagedCodexHost : IWorkHost
             await ready.Task.WaitAsync(TimeSpan.FromSeconds(20), cancel);
             await Request("initialize", new { clientInfo = new { name = "agent_os", version = "0.2.0" }, capabilities = new { experimentalApi = true } });
             await Send(new { method = "initialized" });
-            var started = await Request("thread/start", new { cwd = nativeWorkspace, approvalPolicy = "never", sandbox = "read-only", ephemeral = true,
+            var resuming = work.ThreadId != null;
+            var started = !resuming ? await Request("thread/start", new { cwd = nativeWorkspace, approvalPolicy = "never", sandbox = "read-only", ephemeral = false,
                 config = new Dictionary<string, object> { ["features.shell_tool"] = false, ["features.unified_exec"] = false,
                     ["features.hooks"] = false, ["features.plugins"] = false, ["features.apps"] = false,
                     ["features.multi_agent"] = false, ["features.multi_agent_v2"] = false,
@@ -189,6 +227,12 @@ internal sealed class ManagedCodexHost : IWorkHost
                 developerInstructions = "You are authorized to MODIFY the delegated project through agent_os_shell and agent_os_git. The native Codex sandbox is read-only intentionally: it protects the host configuration, NOT the separately delegated project. Your managed tools execute in another, writable private project workspace. Do not refuse an authorized project edit because native tools are read-only. Use agent_os_shell for file edits, shell and PowerShell tests. Use agent_os_git for Git status/diff/add/commit/log. Native Git is incompatible with AppContainer on this Windows version and is blocked. Relative paths work with PowerShell providers; .NET APIs require [Environment]::CurrentDirectory, not the virtual Work: drive. Every managed command has no network access and cannot write outside its private workspace. Native execution tools are disabled. Coordination is automatic; do not maintain registry entries. Read current files before editing; complete the task. Runtime validates and integrates after you finish.",
                 dynamicTools = new object[] { new { type = "function", name = "agent_os_shell", description = "Execute ordinary PowerShell files, shell and PowerShell tests in the private Windows workspace. No network or outside writes. Children end with this command. Maximum duration 120 seconds. For Git use agent_os_git.", inputSchema = new { type = "object", properties = new { script = new { type = "string" } }, required = new[] { "script" }, additionalProperties = false } },
                     new { type = "function", name = "agent_os_git", description = "Ordinary private Git status, diff, add all changes, commit with message, or log. Remote operations and configuration changes are not delegated.", inputSchema = new { type = "object", properties = new { operation = new { type = "string", @enum = new[] { "status", "diff", "add", "commit", "log" } }, message = new { type = "string" } }, required = new[] { "operation" }, additionalProperties = false } },
+                    new { type = "function", name = "respond_to_conflict", description = "Give a nonempty free-form response to the exact conflict notice. A final answer does not count.", inputSchema = new { type = "object", properties = new { conflictId = new { type = "string" }, explanation = new { type = "string" } }, required = new[] { "conflictId", "explanation" }, additionalProperties = false } },
+                    new { type = "function", name = "agent_os_resolve_conflict", description = "Request validated publication of reconciled conflicting content after responding.", inputSchema = new { type = "object", properties = new { conflictId = new { type = "string" }, explanation = new { type = "string" } }, required = new[] { "conflictId", "explanation" }, additionalProperties = false } },
+                    new { type = "function", name = "agent_os_abandon_conflict", description = "Explicitly abandon deferred conflicting work with an explanation.", inputSchema = new { type = "object", properties = new { conflictId = new { type = "string" }, explanation = new { type = "string" } }, required = new[] { "conflictId", "explanation" }, additionalProperties = false } },
+                    new { type = "function", name = "agent_os_message_peer", description = "Queue a durable message for another managed task.", inputSchema = new { type = "object", properties = new { targetWorkId = new { type = "string" }, message = new { type = "string" } }, required = new[] { "targetWorkId", "message" }, additionalProperties = false } },
+                    new { type = "function", name = "agent_os_interrupt", description = "Request coordinator-mediated interruption of an exact managed task with a reason.", inputSchema = new { type = "object", properties = new { targetWorkId = new { type = "string" }, reason = new { type = "string" } }, required = new[] { "targetWorkId", "reason" }, additionalProperties = false } },
+                    new { type = "function", name = "agent_os_escalate", description = "Record a visible human escalation for an unresolved conflict.", inputSchema = new { type = "object", properties = new { conflictId = new { type = "string" }, explanation = new { type = "string" } }, required = new[] { "conflictId", "explanation" }, additionalProperties = false } },
                     new { type = "function", name = "agent_os_clarify", description = "Ask the current user a scoped clarification and await the exact response. Other tasks continue independently.", inputSchema = new { type = "object", properties = new { question = new { type = "string" }, scope = new { type = "string" }, deadline = new { type = "string" } }, required = new[] { "question", "scope" }, additionalProperties = false } },
                     new { type = "function", name = "agent_os_followup", description = "Record a proposed followup. It is never started automatically; required obligations remain after this turn.", inputSchema = new { type = "object", properties = new { task = new { type = "string" }, required = new { type = "boolean" } }, required = new[] { "task", "required" }, additionalProperties = false } },
                     new { type = "function", name = "agent_os_peer", description = "Ask another active task for a peer acknowledgement; this records a durable request.", inputSchema = new { type = "object", properties = new { targetWorkId = new { type = "string" }, question = new { type = "string" }, deadline = new { type = "string" } }, required = new[] { "targetWorkId", "question" }, additionalProperties = false } },
@@ -196,28 +240,47 @@ internal sealed class ManagedCodexHost : IWorkHost
                     new { type = "function", name = "agent_os_handoff_peer", description = "Hand a pending peer request assigned to this task to another active task.", inputSchema = new { type = "object", properties = new { requestId = new { type = "string" }, targetWorkId = new { type = "string" } }, required = new[] { "requestId", "targetWorkId" }, additionalProperties = false } },
                     new { type = "function", name = "agent_os_wait", description = "Wait for a task, message, decision, or resource condition. The wait is durable, cancelable, and rejects dependency cycles.", inputSchema = new { type = "object", properties = new { kind = new { type = "string", @enum = new[] { "Task", "Message", "Decision", "Resource" } }, targetId = new { type = "string" } }, required = new[] { "kind", "targetId" }, additionalProperties = false } },
                     new { type = "function", name = "agent_os_cancel_wait", description = "Cancel a pending wait owned by this task.", inputSchema = new { type = "object", properties = new { waitId = new { type = "string" } }, required = new[] { "waitId" }, additionalProperties = false } },
-                    new { type = "function", name = "agent_os_preview", description = "Start a task-owned loopback preview of a fixed private source snapshot. If the preferred port is occupied, choose an available port. Dot files and oversized files are excluded; source is served as plain text. Closes on completion or cancellation.", inputSchema = new { type = "object", properties = new { preferredPort = new { type = "integer", minimum = 0, maximum = 65535 } }, required = new[] { "preferredPort" }, additionalProperties = false } } } });
+                    new { type = "function", name = "agent_os_preview", description = "Start a task-owned loopback preview of a fixed private source snapshot. If the preferred port is occupied, choose an available port. Dot files and oversized files are excluded; source is served as plain text. Closes on completion or cancellation.", inputSchema = new { type = "object", properties = new { preferredPort = new { type = "integer", minimum = 0, maximum = 65535 } }, required = new[] { "preferredPort" }, additionalProperties = false } } } }) : await Request("thread/resume", new { threadId = work.ThreadId });
             thread = started.GetProperty("thread").GetProperty("id").GetString();
+            Runtime?.RecordHostThread(work.Id, thread!);
             if (started.TryGetProperty("model", out var actualModel)) model = actualModel.GetString();
-            var turn = await Request("turn/start", new { threadId = thread, input = new[] { new { type = "text", text = work.Task } } });
-            activeTurn = turn.GetProperty("turn").GetProperty("id").GetString();
-            var steering = Task.Run(async () =>
+            string nextInput = !resuming ? work.Task : ProjectRuntime.ContinuationPrompt(Runtime!.Snapshot.Conflicts.First(x => x.WorkId == work.Id && !x.Resolved && !x.Abandoned));
+            for (;;)
             {
-                while (!finished.Task.IsCompleted && !cancel.IsCancellationRequested)
+                var wasOwed = Runtime?.Snapshot.Conflicts.Any(x => x.WorkId == work.Id && !x.Resolved && !x.Abandoned && x.Response == null) ?? false;
+                finished = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var turn = await Request("turn/start", TurnParameters(thread!, nextInput));
+                activeTurn = turn.GetProperty("turn").GetProperty("id").GetString();
+                var steering = Task.Run(async () =>
                 {
-                    foreach (var item in Interactions?.Inspect(work.Id).Where(x => x.Kind == InteractionKind.Steering && x.Status == InteractionStatus.Queued) ?? [])
+                    while (!finished.Task.IsCompleted && !cancel.IsCancellationRequested)
                     {
-                        try { await Request("turn/steer", SteeringParameters(thread!, activeTurn!, item.Text)); Interactions!.Change(item.Id, InteractionStatus.Delivered, turnId: activeTurn); }
-                        catch (Exception e) { try { Interactions!.Change(item.Id, InteractionStatus.Rejected, e.Message); } catch (InvalidOperationException) { } }
+                        foreach (var item in Interactions?.Inspect(work.Id).Where(x => x.Kind == InteractionKind.Steering && x.Status == InteractionStatus.Queued) ?? [])
+                        {
+                            try { await Request("turn/steer", SteeringParameters(thread!, activeTurn!, item.Text)); Interactions!.Change(item.Id, InteractionStatus.Delivered, turnId: activeTurn); }
+                            catch (Exception e) { try { Interactions!.Change(item.Id, InteractionStatus.Rejected, e.Message); } catch (InvalidOperationException) { } }
+                        }
+                        foreach (var message in Runtime?.PendingPeerMessages(work.Id) ?? [])
+                        {
+                            try { await Request("turn/steer", SteeringParameters(thread!, activeTurn!, $"Peer message from {message.FromWorkId}: {message.Text}")); Runtime!.MarkPeerDelivered(work.Id, message.Id); }
+                            catch { output($"Peer message {message.Id} remains queued in durable project state."); }
+                        }
+                        await Task.Delay(150, cancel);
                     }
-                    await Task.Delay(150, cancel);
+                }, CancellationToken.None);
+                var ok = await finished.Task.WaitAsync(cancel);
+                try { await steering; } catch (OperationCanceledException) { }
+                await Task.WhenAll(tools.Values);
+                if (!ok) return new(1, false, thread, report, model);
+                var notice = Runtime == null ? null : await Runtime.AfterManagedTurnAsync(work.Id, cancel);
+                if (notice == null) return new(0, true, thread, report, model);
+                if (wasOwed && Runtime.RegisterConflictNonresponse(work.Id) >= 2)
+                {
+                    output("Conflict response remains owed after repeated turns. Work is durably NeedsResponse.");
+                    return new(0, true, thread, report, model);
                 }
-            }, CancellationToken.None);
-            var ok = await finished.Task.WaitAsync(cancel);
-            try { await steering; } catch (OperationCanceledException) { }
-            foreach (var item in Interactions?.Inspect(work.Id).Where(x => x.Kind == InteractionKind.Steering && x.Status == InteractionStatus.Queued) ?? []) Interactions!.Change(item.Id, InteractionStatus.Rejected, "The turn ended before delivery.");
-            await Task.WhenAll(tools.Values);
-            return new(ok ? 0 : 1, ok, thread, report, model);
+                nextInput = notice;
+            }
         }
         finally
         {

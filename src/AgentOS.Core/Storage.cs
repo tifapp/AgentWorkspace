@@ -22,6 +22,7 @@ internal sealed class StateStore
             state.Maps ??= []; state.Schema = 2;
         }
         if (state.Maps == null) throw new InvalidDataException("Task maps are malformed; state was not changed.");
+        if (state.Work == null || state.Work.Any(x => x.PublishedPathObjects == null) || state.Conflicts == null || state.PeerMessages == null || state.InterruptRequests == null || state.Escalations == null) throw new InvalidDataException("Conflict protocol state is malformed; state was not changed.");
         try
         {
             foreach (var map in state.Maps) TaskMapRules.Validate(map);
@@ -80,4 +81,3 @@ internal static class SafePaths
         dir.Delete();
     }
 }
-

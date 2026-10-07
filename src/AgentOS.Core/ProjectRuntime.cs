@@ -86,13 +86,21 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
                 var ancestor = await Commands.Git(_state.ProjectPath, "merge-base", "--is-ancestor", intended, current);
                 if (ancestor.ExitCode == 0)
                 {
-                    work.Status = WorkStatus.Completed; work.IntegratedCommit = intended;
+                    work.Status = _state.Conflicts.Any(x => x.WorkId == work.Id && !x.Resolved && !x.Abandoned) ? WorkStatus.Parked : WorkStatus.Completed; work.IntegratedCommit = intended;
                     work.PendingCommit = null;
                     work.Detail = "Recovered a completed integration from Git. It was not repeated.";
                 }
                 else { work.Status = WorkStatus.Unknown; work.Detail = "Integration was interrupted. The intended commit is not in the current shared history. Inspect Git before retrying; no effect was replayed."; }
             }
             else { work.Status = WorkStatus.Unknown; work.Detail = "The runtime stopped before confirming completion. Owned process trees were closed; private files are retained. Start a revised task to continue."; }
+            Event(work.Id, "Recovery", work.Detail);
+        }
+        foreach (var work in _state.Work)
+        {
+            var unresolved = _state.Conflicts.Where(x => x.WorkId == work.Id && !x.Resolved && !x.Abandoned).ToArray();
+            if (unresolved.Length == 0 || work.Status is WorkStatus.NeedsResponse or WorkStatus.Parked) continue;
+            work.Status = unresolved.Any(x => x.Response == null) ? WorkStatus.NeedsResponse : WorkStatus.Parked;
+            work.Detail = "Recovered unresolved conflict and retained its private candidate. Resume the original thread.";
             Event(work.Id, "Recovery", work.Detail);
         }
         foreach (var decision in _state.Decisions.Where(x => x.Status is DecisionStatus.Approved or DecisionStatus.Unknown))
@@ -176,25 +184,12 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
                 return;
             }
             token.ThrowIfCancellationRequested();
+            if (_host is ManagedCodexHost) return;
             await Capture(work);
             Set(work, WorkStatus.Private, $"Private candidate prepared: {work.ChangedPaths.Count} changed paths. Validation and integration are still required.");
-            if (work.AutoIntegrate)
-            {
-                await IntegrateCore(work, token);
-                if (work.Status == WorkStatus.Stale && !token.IsCancellationRequested)
-                {
-                    var depth = 0; var ancestor = work;
-                    lock (_sync) while (ancestor.ParentId != null) { depth++; ancestor = _state.Work.Single(x => x.Id == ancestor.ParentId); }
-                    if (depth < 2)
-                    {
-                        Mutate(() => Event(work.Id, "Revision", "Codex will reread the current shared version and revise this stale candidate within the existing task authority."));
-                        await ReviseAsync(work.Id);
-                    }
-                    else Mutate(() => Event(work.Id, "Revision", "Two automatic revisions were attempted. The stale candidate remains private for investigation; no broader authority was requested."));
-                }
-            }
+            if (work.AutoIntegrate) await IntegrateCore(work, token);
         }
-        catch (OperationCanceledException) { Set(work, WorkStatus.Canceled, "Canceled. Owned processes stopped; private output is retained. No queued integration will run later."); }
+        catch (OperationCanceledException) { var pending = _state.Conflicts.Where(x => x.WorkId == work.Id && !x.Resolved && !x.Abandoned).ToArray(); Set(work, pending.Length == 0 ? WorkStatus.Canceled : pending.Any(x => x.Response == null) ? WorkStatus.NeedsResponse : WorkStatus.Parked, "Canceled. Owned processes stopped; private candidate and any unresolved conflict are retained."); }
         catch (Exception e) { RecordFailure(work, e); }
     }
 
@@ -207,7 +202,7 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
         if (modes.Split('\n').Any(x => x.StartsWith("120000 ") || x.StartsWith("160000 ")))
             throw new IOException("Candidate contains symbolic links or submodules, which this release cannot mediate.");
         var candidate = await Commit(work.Workspace, tree, work.BaseCommit, "agent-os: " + work.ShortTask);
-        (await Commands.Git(_state.ProjectPath, "fetch", "--no-tags", "--no-write-fetch-head", work.Workspace, candidate + ":refs/agent-os/candidates/" + work.Id)).Checked();
+        (await Commands.Git(_state.ProjectPath, "fetch", "--no-tags", "--no-write-fetch-head", work.Workspace, "+" + candidate + ":refs/agent-os/candidates/" + work.Id)).Checked();
         var paths = (await Commands.Git(work.Workspace, "diff", "--name-only", "-z", work.BaseCommit, candidate)).Checked().Split('\0', StringSplitOptions.RemoveEmptyEntries).ToList();
         var diff = (await Commands.Git(work.Workspace, "diff", "--no-ext-diff", "--no-textconv", work.BaseCommit, candidate)).Checked();
         Mutate(() => { work.CandidateCommit = candidate; work.ChangedPaths = paths; work.Diff = diff; });
@@ -221,6 +216,7 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
         var work = Find(id);
         lock (_sync)
         {
+            if (_state.Conflicts.Any(x => x.WorkId == id && !x.Resolved && !x.Abandoned)) throw new InvalidOperationException("Deferred conflict remains unresolved.");
             if (work.Status == WorkStatus.Completed) return Task.CompletedTask;
             if (work.Status != WorkStatus.Private) throw new InvalidOperationException("Only a prepared private candidate can be integrated. Revise stale or failed work first.");
             if (_jobs.TryGetValue(id, out var old) && !old.IsCompleted) throw new InvalidOperationException("This work unit is still finishing. Try again when it is idle.");
@@ -247,17 +243,17 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
             token.ThrowIfCancellationRequested();
             var project = _state.ProjectPath;
             var current = (await Commands.Git(project, "rev-parse", IntegratedRef)).Checked();
+            var resolvedPaths = _state.Conflicts.Where(x => x.WorkId == work.Id && x.ResolutionRequested && !x.Resolved && !x.Abandoned).SelectMany(x => x.Paths).ToHashSet(StringComparer.Ordinal);
             // Check the complete path identity, including mode and blob, after ownership is acquired.
+            var changedTouchedPaths = new List<string>();
             foreach (var path in work.ChangedPaths)
             {
+                if (resolvedPaths.Contains(path)) continue;
                 var before = (await Commands.Git(project, "ls-tree", "-z", work.BaseCommit, "--", path)).Checked();
                 var now = (await Commands.Git(project, "ls-tree", "-z", current, "--", path)).Checked();
-                if (before != now)
-                {
-                    Set(work, WorkStatus.Stale, $"{path} changed while this candidate was private or waiting. It was not applied. Revise with Codex against the current shared version.");
-                    return;
-                }
+                if (before != now) changedTouchedPaths.Add(path);
             }
+            if (changedTouchedPaths.Count > 0) { await RecordConflict(work, "TouchedPathChanged", changedTouchedPaths, current); return; }
             var index = Path.Combine(_store.Root, "integrate-" + Guid.NewGuid().ToString("N") + ".index");
             string tree;
             try
@@ -267,12 +263,18 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
                 // to a private index of current; no fuzzy/three-way content merge is authorized.
                 // This also handles directory/file replacements on older Git versions.
                 (await Commands.RunAsync("git", ["read-tree", current], project, token, environment: env)).Checked();
-                var patch = await Commands.Git(project, "diff", "--binary", "--full-index", "--no-renames", "--no-ext-diff", "--no-textconv", work.BaseCommit, work.CandidateCommit!, "--");
+                var patchPaths = work.ChangedPaths.Where(x => !resolvedPaths.Contains(x)).ToArray();
+                var patch = await Commands.Git(project, (new[] { "diff", "--binary", "--full-index", "--no-renames", "--no-ext-diff", "--no-textconv", work.BaseCommit, work.CandidateCommit!, "--" }).Concat(patchPaths).ToArray());
                 patch.Checked();
-                var merged = work.ChangedPaths.Count == 0 ? new CommandResult(0, "", "") :
+                var merged = patchPaths.Length == 0 ? new CommandResult(0, "", "") :
                     await Commands.RunAsync("git", ["apply", "--cached", "--binary", "--whitespace=nowarn"], project, token, input: patch.Output, environment: env);
+                if (merged.ExitCode == 0)
+                {
+                    try { await StageResolvedPaths(work, resolvedPaths, env, token); }
+                    catch (Exception e) when (e is IOException or InvalidDataException) { await RecordConflict(work, "ExactPatchFailure", work.ChangedPaths, current); return; }
+                }
                 var written = await Commands.RunAsync("git", ["write-tree"], project, token, environment: env);
-                if (merged.ExitCode != 0 || written.ExitCode != 0) { Set(work, WorkStatus.Stale, "The candidate cannot merge safely into the current shared version. Revise with Codex; no authority grant is needed."); return; }
+                if (merged.ExitCode != 0 || written.ExitCode != 0) { await RecordConflict(work, "ExactPatchFailure", work.ChangedPaths, current); return; }
                 tree = written.Checked();
             }
             finally { if (File.Exists(index)) File.Delete(index); }
@@ -288,14 +290,17 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
             if (publish.ExitCode != 0)
             {
                 Mutate(() => work.PendingCommit = null);
-                Set(work, WorkStatus.Stale, "The shared branch changed during validation. Publication was refused; revise against its current version."); return;
+                var raced = (await Commands.Git(project, "rev-parse", IntegratedRef)).Checked();
+                if (raced == current) throw new IOException("Git rejected publication without a changed shared ref: " + publish.Error);
+                await RecordConflict(work, "UpdateRefRace", work.ChangedPaths, raced); return;
             }
             Mutate(() =>
             {
                 work.IntegratedCommit = commit; work.PendingCommit = null; _state.IntegratedCommit = commit;
-                work.Status = WorkStatus.Completed; work.UpdatedAt = DateTimeOffset.UtcNow;
-                work.Detail = "Validated and integrated into agent-os/integrated. Your checked-out branch has not been switched.";
-                UpdateMapStatuses(); Event(work.Id, "Completed", work.Detail);
+                foreach (var notice in _state.Conflicts.Where(x => x.WorkId == work.Id && x.ResolutionRequested && !x.Abandoned && x.Paths.All(work.ChangedPaths.Contains))) { notice.Resolved = true; notice.PublicationBlocked = false; }
+                work.Status = _state.Conflicts.Any(x => x.WorkId == work.Id && !x.Resolved && !x.Abandoned) ? WorkStatus.Parked : WorkStatus.Completed; work.UpdatedAt = DateTimeOffset.UtcNow;
+                work.Detail = work.Status == WorkStatus.Parked ? "Independent edits were validated and integrated; original conflicting work remains parked with its private candidate." : "Validated and integrated into agent-os/integrated. Your checked-out branch has not been switched.";
+                UpdateMapStatuses(); Event(work.Id, work.Status == WorkStatus.Parked ? "PartialPublication" : "Completed", work.Detail);
             });
             ScheduleSelectedMapTasks();
         }
@@ -431,12 +436,13 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
     {
         var work = Find(id);
         if (work.IsActive || (_jobs.TryGetValue(id, out var job) && !job.IsCompleted)) throw new InvalidOperationException("Cancel and wait for the owned process tree to stop before cleanup.");
+        if (_state.Conflicts.Any(x => x.WorkId == id && !x.Resolved && !x.Abandoned)) throw new InvalidOperationException("Resolve or abandon deferred work before cleanup.");
         await Task.Run(() => SafePaths.DeleteOwnedDirectory(Path.Combine(_store.Root, "workspaces"), work.Workspace));
         Mutate(() => { work.WorkspaceRemoved = true; Event(id, "Cleanup", "Removed this task's private workspace. Candidate, transcript, and validation evidence were retained."); });
     }
     public async Task WaitForIdleAsync()
     {
-        // A stale candidate may enqueue an authorized Codex revision before its parent finishes.
+        // Host continuation and publication can extend a task after a completed turn.
         while (true)
         {
             var pending = _jobs.Values.Where(x => !x.IsCompleted).ToArray();
@@ -449,7 +455,8 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
     private void RecordFailure(WorkUnit work, Exception error)
     {
         try { File.WriteAllText(LogPath(work, "runtime-error.txt"), error.ToString()); } catch (IOException) { } catch (UnauthorizedAccessException) { }
-        Set(work, work.PendingCommit == null && work.IntegratedCommit == null ? WorkStatus.Failed : WorkStatus.Unknown,
+        var unresolved = _state.Conflicts.Where(x => x.WorkId == work.Id && !x.Resolved && !x.Abandoned).ToArray();
+        Set(work, unresolved.Length > 0 ? unresolved.Any(x => x.Response == null) ? WorkStatus.NeedsResponse : WorkStatus.Parked : work.PendingCommit == null && work.IntegratedCommit == null ? WorkStatus.Failed : WorkStatus.Unknown,
             error.Message + " Private files and evidence are retained. Inspect runtime diagnostics; an unconfirmed publication is not replayed.");
     }
     private string LogPath(WorkUnit work, string name) { var path = Path.Combine(_store.Root, "evidence", work.Id); Directory.CreateDirectory(path); return Path.Combine(path, name); }
@@ -457,7 +464,7 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
     private void Set(WorkUnit work, WorkStatus status, string detail)
     {
         Mutate(() => { work.Status = status; work.Detail = detail; work.UpdatedAt = DateTimeOffset.UtcNow; UpdateMapStatuses(); Event(work.Id, status.ToString(), detail); });
-        if (!work.IsActive) OnInteractionOwnerEnded(work.Id);
+        if (!work.IsActive && status is not (WorkStatus.NeedsResponse or WorkStatus.Parked)) OnInteractionOwnerEnded(work.Id);
         if (status == WorkStatus.Completed) ScheduleSelectedMapTasks();
     }
     private void Event(string? id, string kind, string message)

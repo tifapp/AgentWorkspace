@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 
 namespace AgentOS.Core;
 
-public enum WorkStatus { Preparing, Running, Private, Waiting, Validating, Completed, Stale, Failed, Canceled, Unknown }
+public enum WorkStatus { Preparing, Running, Private, Waiting, Validating, Completed, Stale, Failed, Canceled, Unknown, NeedsResponse, Parked, Abandoned }
 public enum DecisionStatus { Pending, Approved, Rejected, Completed, Stale, Unknown }
 
 public sealed class ProjectState
@@ -19,6 +19,10 @@ public sealed class ProjectState
     public List<TaskMap> Maps { get; set; } = [];
     public List<HumanDecision> Decisions { get; set; } = [];
     public List<EffectEvent> Events { get; set; } = [];
+    public List<ConflictNotice> Conflicts { get; set; } = [];
+    public List<PeerMessage> PeerMessages { get; set; } = [];
+    public List<InterruptRequest> InterruptRequests { get; set; } = [];
+    public List<HumanEscalation> Escalations { get; set; } = [];
 }
 
 public sealed class WorkUnit
@@ -38,6 +42,7 @@ public sealed class WorkUnit
     public string? PendingCommit { get; set; }
     public string? PendingBase { get; set; }
     public string? ThreadId { get; set; }
+    public int ConflictNonresponses { get; set; }
     public string? HostVersion { get; set; }
     public string? HostModel { get; set; }
     public string ValidationCommand { get; set; } = "";
@@ -46,6 +51,7 @@ public sealed class WorkUnit
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
     public List<string> ChangedPaths { get; set; } = [];
+    public Dictionary<string, string> PublishedPathObjects { get; set; } = new(StringComparer.Ordinal);
     public string Diff { get; set; } = "";
     public List<ValidationEvidence> Evidence { get; set; } = [];
     public string StatusLabel => Status == WorkStatus.Private ? "Private candidate" : Status.ToString();
@@ -53,6 +59,49 @@ public sealed class WorkUnit
     public bool IsActive => Status is WorkStatus.Preparing or WorkStatus.Running or WorkStatus.Waiting or WorkStatus.Validating;
 }
 
+public sealed class ConflictNotice
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public string WorkId { get; set; } = "";
+    public string Cause { get; set; } = "";
+    public bool PublicationBlocked { get; set; } = true;
+    public List<string> Paths { get; set; } = [];
+    public string BaseCommit { get; set; } = "";
+    public string CurrentCommit { get; set; } = "";
+    public string? HolderWorkId { get; set; }
+    public string? DeferredCandidateCommit { get; set; }
+    public string? Response { get; set; }
+    public bool ResolutionRequested { get; set; }
+    public string? ResolutionExplanation { get; set; }
+    public bool Resolved { get; set; }
+    public bool Abandoned { get; set; }
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+public sealed class PeerMessage
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public string FromWorkId { get; set; } = "";
+    public string ToWorkId { get; set; } = "";
+    public string Text { get; set; } = "";
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset? DeliveredAt { get; set; }
+}
+public sealed class InterruptRequest
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public string FromWorkId { get; set; } = "";
+    public string TargetWorkId { get; set; } = "";
+    public string Reason { get; set; } = "";
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+public sealed class HumanEscalation
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public string WorkId { get; set; } = "";
+    public string ConflictId { get; set; } = "";
+    public string Explanation { get; set; } = "";
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
 public sealed class ValidationEvidence
 {
     public string Commit { get; set; } = "";
@@ -97,4 +146,3 @@ public static class JsonFormat
     };
     public static T Copy<T>(T value) => JsonSerializer.Deserialize<T>(JsonSerializer.Serialize(value, Options), Options)!;
 }
-

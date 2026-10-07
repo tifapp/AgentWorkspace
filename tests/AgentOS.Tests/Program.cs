@@ -92,6 +92,9 @@ await Test("Steering request binds delivery to the active turn", async () =>
     using var document = JsonDocument.Parse(wire);
     Assert(document.RootElement.GetProperty("expectedTurnId").GetString() == "turn-7", "Steering did not pin the active turn.");
     Assert(document.RootElement.GetProperty("threadId").GetString() == "thread-1", "Steering lost thread identity.");
+    var notice = new ConflictNotice { Cause = "TouchedPathChanged", BaseCommit = "base", CurrentCommit = "current", Paths = ["settings.json"] };
+    using var continuation = JsonDocument.Parse(JsonSerializer.Serialize(ManagedCodexHost.TurnParameters("thread-1", ProjectRuntime.ConflictPrompt(notice))));
+    Assert(continuation.RootElement.GetProperty("threadId").GetString() == "thread-1" && continuation.RootElement.GetProperty("input")[0].GetProperty("text").GetString()!.Contains(notice.Id), "Conflict continuation lost original thread or exact notice.");
     await Task.CompletedTask;
 });
 await Test("Interaction journal survives restart and does not replay steering", async () =>
@@ -145,6 +148,40 @@ await Test("Wait cycles and peer disappearance settle deterministically", async 
     b.Status = WorkStatus.Canceled;
     typeof(ProjectRuntime).GetMethod("OnInteractionOwnerEnded", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.Invoke(r, [b.Id]);
     Assert(r.InspectInteractions(a.Id).Single(x => x.Id == peer.Id).Status == InteractionStatus.Rejected, "Peer disappearance left request pending.");
+});
+await Test("Peer delivery, exact interrupt, cancelable wait and human escalation persist", async () =>
+{
+    var project = await PracticeProject.CreateAsync(root);
+    var dataRoot = Path.Combine(root, "conflict-coordination");
+    string messageId, interruptId, escalationId, aId, bId;
+    await using (var r = await ProjectRuntime.OpenInternal(project, dataRoot, new ScriptHost(), Path.Combine(root, "coordination")))
+    {
+        r.Configure("Write-Output passed");
+        aId = await r.StartAsync("Start-Sleep -Seconds 12");
+        bId = await r.StartAsync("Start-Sleep -Seconds 12");
+        await Eventually(() => Work(r, aId).Status == WorkStatus.Running && Work(r, bId).Status == WorkStatus.Running);
+        var message = r.SendPeerMessage(aId, bId, "Please preserve the shared setting."); messageId = message.Id;
+        Assert(r.PendingPeerMessages(bId).Single().Id == messageId, "Peer message was not queued.");
+        r.MarkPeerDelivered(bId, messageId);
+        Assert(r.PendingPeerMessages(bId).Count == 0, "Delivered peer message replayed.");
+        var wait = r.CreateWait(aId, WaitKind.Task, bId);
+        Assert(r.CancelWait(aId, wait.Id).Status == InteractionStatus.Canceled, "Wait did not cancel.");
+        var state = (ProjectState)typeof(ProjectRuntime).GetField("_state", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(r)!;
+        var notice = new ConflictNotice { WorkId = aId, Cause = "TouchedPathChanged", Paths = ["settings.json"] };
+        state.Conflicts.Add(notice);
+        escalationId = r.EscalateConflict(aId, notice.Id, "Need a human decision about ownership.").Id;
+        interruptId = r.InterruptManagedTask(aId, bId, "Stop this exact managed task.").Id;
+        await r.WaitForIdleAsync();
+        Assert(r.Snapshot.InterruptRequests.Single(x => x.Id == interruptId).TargetWorkId == bId, "Interrupt targeted the wrong task.");
+        Assert(r.Snapshot.Conflicts.Single(x => x.Id == notice.Id).Response == null, "Coordinator fabricated a conflict response.");
+        r.RespondToConflict(aId, notice.Id, "I will abandon the deferred change.");
+        r.AbandonConflict(aId, notice.Id, "Explicitly abandon it.");
+        Assert(r.Snapshot.Conflicts.Single(x => x.Id == notice.Id).Abandoned, "Explicit abandonment was not retained.");
+    }
+    await using var reopened = await ProjectRuntime.OpenInternal(project, dataRoot, new ScriptHost(), Path.Combine(root, "coordination"));
+    Assert(reopened.Snapshot.PeerMessages.Single(x => x.Id == messageId).DeliveredAt != null, "Peer delivery was lost on restart.");
+    Assert(reopened.Snapshot.InterruptRequests.Single(x => x.Id == interruptId).Reason.Contains("exact managed task"), "Interrupt reason was lost.");
+    Assert(reopened.Snapshot.Escalations.Single(x => x.Id == escalationId).ConflictId == reopened.Snapshot.Conflicts.Single().Id, "Human escalation was lost.");
 });
 const string ChangeRetries = "Set-Content settings.json '{\"retries\":2,\"cancellation\":false}'; git diff";
 const string ChangeCancel = "Set-Content settings.json '{\"retries\":1,\"cancellation\":true}'; git diff";
@@ -254,6 +291,32 @@ await Test("Private source, Git indexes, and ordinary shell are separate", async
     Assert(Work(r, id).ChangedPaths.SequenceEqual(["settings.json"]), "Candidate paths incorrect.");
 });
 
+await Test("Schema-2 state and owed response survive restart", async () =>
+{
+    var schemaRoot = Path.Combine(root, "schema2-conflict-" + Guid.NewGuid().ToString("N"));
+    var store = new StateStore(schemaRoot);
+    File.WriteAllText(store.StatePath, JsonSerializer.Serialize(new { Schema = 2, ProjectPath = @"C:\old", Work = new[] { new { Task = "preserved schema-2 task" } }, Maps = Array.Empty<object>() }, JsonFormat.Options));
+    Assert(store.Read()!.Work.Single().Task == "preserved schema-2 task" && store.Read()!.Conflicts.Count == 0, "Schema-2 history was lost.");
+    var project = await PracticeProject.CreateAsync(root);
+    var dataRoot = Path.Combine(root, "owed-response-" + Guid.NewGuid().ToString("N"));
+    string b, noticeId, candidate;
+    await using (var r = await ProjectRuntime.OpenInternal(project, dataRoot, new ScriptHost(), Path.Combine(root, "coordination")))
+    {
+        r.Configure("Write-Output passed");
+        var a = await r.StartAsync(ChangeRetries, false); b = await r.StartAsync(ChangeCancel, false);
+        await r.WaitForIdleAsync(); await r.IntegrateAsync(a); await r.IntegrateAsync(b);
+        var notice = r.Snapshot.Conflicts.Single(x => x.WorkId == b);
+        noticeId = notice.Id; candidate = notice.DeferredCandidateCommit!;
+        Assert((await r.AfterManagedTurnAsync(b, CancellationToken.None))!.Contains(noticeId), "Completed turn discharged owed response.");
+        Assert(r.RegisterConflictNonresponse(b) == 1 && r.RegisterConflictNonresponse(b) == 2, "Nonresponse bound was not retained.");
+        var refused = false; try { await r.IntegrateAsync(b); } catch (InvalidOperationException) { refused = true; }
+        Assert(refused, "Owed response published naturally.");
+    }
+    await using var reopened = await ProjectRuntime.OpenInternal(project, dataRoot, new ScriptHost(), Path.Combine(root, "coordination"));
+    var saved = reopened.Snapshot.Conflicts.Single(x => x.Id == noticeId);
+    Assert(saved.Response == null && saved.DeferredCandidateCommit == candidate && Work(reopened, b).Status == WorkStatus.NeedsResponse && Work(reopened, b).ConflictNonresponses == 2, "Restart lost response obligation or candidate.");
+    Assert((await Commands.Git(project, "rev-parse", "refs/agent-os/deferred/" + noticeId)).Checked() == candidate, "Restart lost private candidate ref.");
+});
 await Test("Real contention: stale writer refused, independent candidate revalidated", async () =>
 {
     await using var r = await NewRuntime(); r.Configure("Start-Sleep -Seconds 2; Write-Output passed");
@@ -268,7 +331,7 @@ await Test("Real contention: stale writer refused, independent candidate revalid
     Assert(!first.IsCompleted, "Wait was not exercised under actual contention.");
     await Task.WhenAll(first, second, third);
     Assert(Work(r, a).Status == WorkStatus.Completed, Work(r, a).Detail);
-    Assert(Work(r, b).Status == WorkStatus.Stale, Work(r, b).Detail);
+    Assert(Work(r, b).Status == WorkStatus.NeedsResponse, Work(r, b).Detail);
     Assert(Work(r, c).Status == WorkStatus.Completed, Work(r, c).Detail);
     Assert(Work(r, c).Evidence.Single().AgainstCommit == Work(r, a).IntegratedCommit, "Independent candidate wasn't retested on combined input.");
     var shared = (await Commands.Git(r.Snapshot.ProjectPath, "show", ProjectRuntime.IntegratedRef + ":settings.json")).Checked();
@@ -396,7 +459,7 @@ await Test("Direct same-user bypass is detected as an unsupported boundary", asy
     Assert(ProjectRuntime.Coverage.Contains("unmanaged programs are not supported mediation surfaces"), "UI hides boundary limitation.");
 });
 
-await Test("Automatic integration revises stale work within bounded task authority", async () =>
+await Test("Conflict notice retains candidate and independent edits keep original work parked", async () =>
 {
     var project = await PracticeProject.CreateAsync(root);
     await using var r = await ProjectRuntime.OpenInternal(project, Path.Combine(root, "state"), new RevisingHost(), Path.Combine(root, "coordination"));
@@ -404,15 +467,42 @@ await Test("Automatic integration revises stale work within bounded task authori
     var a = await r.StartAsync("retry"); var b = await r.StartAsync("cancel");
     await r.WaitForIdleAsync();
     Assert(Work(r, a).Status == WorkStatus.Completed, Work(r, a).Detail);
-    Assert(Work(r, b).Status == WorkStatus.Stale, Work(r, b).Detail);
-    var revision = r.Snapshot.Work.Single(w => w.ParentId == b);
-    Assert(revision.Status == WorkStatus.Completed, revision.Detail);
-    Assert(r.Snapshot.Decisions.Count == 0, "Routine revision required human authority.");
-    var final = (await Commands.Git(project, "show", ProjectRuntime.IntegratedRef + ":settings.json")).Checked();
-    using var json = JsonDocument.Parse(final);
-    Assert(json.RootElement.GetProperty("retries").GetInt32() == 2 && json.RootElement.GetProperty("cancellation").GetBoolean(), "Revision lost prior work.");
+    Assert(Work(r, b).Status == WorkStatus.NeedsResponse && r.Snapshot.Work.Count == 2, "Conflict spawned a revision child or completed naturally.");
+    var notice = r.Snapshot.Conflicts.Single(x => x.WorkId == b);
+    Assert(notice.Cause == "TouchedPathChanged" && notice.PublicationBlocked && notice.Paths.SequenceEqual(["settings.json"]), "Exact cause or path was lost.");
+    Assert(notice.BaseCommit == Work(r, b).BaseCommit && notice.CurrentCommit == Work(r, a).IntegratedCommit && notice.HolderWorkId == a, "Shared identity or holder was lost.");
+    Assert(notice.DeferredCandidateCommit == Work(r, b).CandidateCommit, "Original candidate identity was lost.");
+    Assert(r.Snapshot.PeerMessages.Count == 0 && r.Snapshot.InterruptRequests.Count == 0 && r.Snapshot.Escalations.Count == 0, "Conflict triggered unauthorized coordination.");
+    Assert((await Commands.Git(project, "rev-parse", "refs/agent-os/deferred/" + notice.Id)).Checked() == notice.DeferredCandidateCommit, "Deferred candidate has no private ref.");
+    var prompt = await r.AfterManagedTurnAsync(b, CancellationToken.None);
+    Assert(prompt != null && prompt.Contains(notice.Id) && Work(r, b).Status == WorkStatus.NeedsResponse, "A normal final turn discharged the owed response.");
+    var emptyDenied = false; try { r.RespondToConflict(b, notice.Id, " "); } catch (ArgumentException) { emptyDenied = true; }
+    Assert(emptyDenied, "Empty response was accepted.");
+    r.RespondToConflict(b, notice.Id, "I will preserve the peer setting and finish an independent edit.");
+    File.AppendAllText(Path.Combine(Work(r, b).Workspace, "README.md"), "\nIndependent continuation");
+    await r.AfterManagedTurnAsync(b, CancellationToken.None);
+    Assert(Work(r, b).Status == WorkStatus.Parked && !r.Snapshot.Conflicts.Single(x => x.Id == notice.Id).Resolved, "Independent publication completed deferred work.");
+    Assert((await Commands.Git(project, "show", ProjectRuntime.IntegratedRef + ":README.md")).Checked().Contains("Independent continuation"), "Independent edit was not published.");
+    var cleanupDenied = false; try { await r.CleanupAsync(b); } catch (InvalidOperationException) { cleanupDenied = true; }
+    Assert(cleanupDenied, "Unresolved source workspace was removed.");
+    File.WriteAllText(Path.Combine(Work(r, b).Workspace, "settings.json"), "{\"retries\":2,\"cancellation\":true}");
+    r.ResolveConflict(b, notice.Id, "Reconciled both settings.");
+    await r.AfterManagedTurnAsync(b, CancellationToken.None);
+    Assert(Work(r, b).Status == WorkStatus.Completed && r.Snapshot.Conflicts.Single(x => x.Id == notice.Id).Resolved, "Reconciled conflict did not finish after validation.");
+    using var final = JsonDocument.Parse((await Commands.Git(project, "show", ProjectRuntime.IntegratedRef + ":settings.json")).Checked());
+    Assert(final.RootElement.GetProperty("retries").GetInt32() == 2 && final.RootElement.GetProperty("cancellation").GetBoolean(), "Resolution lost peer content.");
 });
-
+await Test("Exact patch failure records blocked paths and candidate", async () =>
+{
+    await using var r = await NewRuntime(); r.Configure("Write-Output passed");
+    var a = await r.StartAsync("Set-Content area parent", false);
+    var b = await r.StartAsync("New-Item -ItemType Directory area | Out-Null; Set-Content area/item.txt child", false);
+    await r.WaitForIdleAsync();
+    await r.IntegrateAsync(a); await r.IntegrateAsync(b);
+    var notice = r.Snapshot.Conflicts.Single(x => x.WorkId == b);
+    Assert(Work(r, b).Status == WorkStatus.NeedsResponse && notice.Cause == "ExactPatchFailure" && notice.Paths.SequenceEqual(["area/item.txt"]), "Exact patch failure was not recorded.");
+    Assert(notice.BaseCommit == Work(r, b).BaseCommit && notice.CurrentCommit == Work(r, a).IntegratedCommit && notice.DeferredCandidateCommit == Work(r, b).CandidateCommit && notice.HolderWorkId == a, "Patch failure lost commit identities or known holder.");
+});
 await Test("External ref change during validation refuses compare-and-swap", async () =>
 {
     await using var r = await NewRuntime(); r.Configure("Start-Sleep -Seconds 3; Write-Output passed");
@@ -421,7 +511,8 @@ await Test("External ref change during validation refuses compare-and-swap", asy
     // A same-user external actor changes the managed ref. This must defeat the expected-old check.
     (await Commands.Git(r.Snapshot.ProjectPath, "update-ref", ProjectRuntime.IntegratedRef, Work(r, id).CandidateCommit!)).Checked();
     await integration;
-    Assert(Work(r, id).Status == WorkStatus.Stale && Work(r, id).Evidence.Single().Passed, "A changed shared ref published tested work under stale assumptions.");
+    Assert(Work(r, id).Status == WorkStatus.NeedsResponse && Work(r, id).Evidence.Single().Passed, "A changed shared ref published tested work under stale assumptions.");
+    Assert(r.Snapshot.Conflicts.Single(x => x.WorkId == id).Cause == "UpdateRefRace", "CAS race lost exact cause.");
 });
 
 await Test("Unicode survives the Windows process adapter", async () =>
@@ -474,11 +565,11 @@ await Test("Reference OV3 OV4: directory overlap blocks but prefix sibling and c
     var c = await r.StartAsync("Set-Content area-old/item.txt independent", false);
     await r.WaitForIdleAsync();
     await r.IntegrateAsync(a); await r.IntegrateAsync(b); await r.IntegrateAsync(c);
-    Assert(Work(r, a).Status == WorkStatus.Completed && Work(r, b).Status == WorkStatus.Stale && Work(r, c).Status == WorkStatus.Completed, "Directory replacement lost overlap or blocked a prefix sibling.");
+    Assert(Work(r, a).Status == WorkStatus.Completed && Work(r, b).Status == WorkStatus.NeedsResponse && Work(r, c).Status == WorkStatus.Completed, "Directory replacement lost overlap or blocked a prefix sibling.");
     var first = await r.StartAsync(ChangeRetries, false);
     var caseVariant = await r.StartAsync("Set-Content SETTINGS.json '{\"retries\":1,\"cancellation\":true}'", false);
     await r.WaitForIdleAsync(); await r.IntegrateAsync(first); await r.IntegrateAsync(caseVariant);
-    Assert(Work(r, caseVariant).Status == WorkStatus.Stale, "Windows case variant escaped stale detection.");
+    Assert(Work(r, caseVariant).Status == WorkStatus.NeedsResponse, "Windows case variant escaped stale detection.");
 });
 
 await Test("Reference ST1 AK3 PR12: stop and cleanup preserve a pending decision and peer workspace", async () =>
@@ -501,19 +592,16 @@ await Test("Reference ST1 AK3 PR12: stop and cleanup preserve a pending decision
     Assert(recovered.Snapshot.Decisions.Single().Status == DecisionStatus.Completed, "Retained evidence could not support the scoped decision after cleanup.");
 });
 
-await Test("Reference ST3 ST7: repeated stale revisions stop at the bound and retain parent outcomes", async () =>
+await Test("Repeated contention keeps one candidate and an owed response", async () =>
 {
     var project = await PracticeProject.CreateAsync(root);
     var host = new RepeatedContentionHost(project);
     await using var r = await ProjectRuntime.OpenInternal(project, Path.Combine(root, "state"), host, Path.Combine(root, "coordination"));
     r.Configure("Write-Output passed");
     await r.StartAsync("Update settings without overwriting newer work"); await r.WaitForIdleAsync();
-    var work = r.Snapshot.Work;
-    Assert(host.Runs == 3 && work.Count == 3 && work.All(x => x.Status == WorkStatus.Stale), "Automatic revision was unbounded or overwrote a parent outcome.");
-    Assert(work[1].ParentId == work[0].Id && work[2].ParentId == work[1].Id && r.Snapshot.Decisions.Count == 0, "Revision lineage was lost or contention asked for authority.");
-    Assert(r.Snapshot.Events.Any(x => x.Message.StartsWith("Two automatic revisions")), "The retry bound was not explained.");
+    Assert(host.Runs == 1 && r.Snapshot.Work.Count == 1, "Contention spawned a revision child.");
+    Assert(r.Snapshot.Work.Single().Status == WorkStatus.NeedsResponse && r.Snapshot.Conflicts.Single().Cause == "TouchedPathChanged", "Conflict did not require an exact response.");
 });
-
 await Test("Reference LF6: invalid task identity cannot create a child or target cleanup", async () =>
 {
     await using var r = await NewRuntime(); r.Configure("Write-Output passed");
@@ -837,6 +925,3 @@ internal sealed class RepeatedContentionHost(string project) : IWorkHost
         return new(0, true, null);
     }
 }
-
-
-
