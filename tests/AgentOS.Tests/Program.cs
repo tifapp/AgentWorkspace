@@ -65,6 +65,7 @@ async Task<ProjectRuntime> NewRuntime()
 { var project = await PracticeProject.CreateAsync(root); return await ProjectRuntime.OpenInternal(project, Path.Combine(root, "state"), new ScriptHost(), Path.Combine(root, "coordination")); }
 static WorkUnit Work(ProjectRuntime runtime, string id) => runtime.Snapshot.Work.Single(w => w.Id == id);
 async Task TestAsync(string name, Func<Task> check) => await Test(name, check);
+await AgentOS.Tests.KernelChecks.RunAsync(Test, Path.Combine(root, "kernel"));
 await UpdateProtocolChecks.Run(Test, NewRuntime, root);
 await AgentOS.Tests.ConflictBehaviorChecks.RunAsync(Test, Path.Combine(root, "conflict-behavior"));
 await AgentOS.Tests.ConflictContinuityChecks.RunAsync(Test, Path.Combine(root, "conflict-continuity"));
@@ -981,3 +982,4 @@ internal sealed class RevisionTitleHost : IWorkHost
         return new HostResult(code, true, null, work.ParentId == null ? null : Marked ? "Revision title: Reconcile the setting\nCompleted the revision." : "Completed the revision.");
     }
 }
+
