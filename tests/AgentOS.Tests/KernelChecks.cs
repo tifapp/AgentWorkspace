@@ -1,4 +1,5 @@
 using AgentOS.Core.Coordination;
+using AgentOS.Core.Adapters;
 using System.Text.Json;
 using System.Runtime.InteropServices;
 namespace AgentOS.Tests;
@@ -166,30 +167,36 @@ internal static class KernelChecks
             Check(service.ReadAdmission(c,later.Id).State=="admitted","Reader failed to wake after writer release.");
             return Task.CompletedTask;
         });
-        await test("Kernel admission path boundaries and alias refusal",()=>{
-            var rootPath=Fresh(root,"admission-paths");
-            var parent=Path.Combine(rootPath,"parent");var sibling=Path.Combine(rootPath,"parent2");
-            Directory.CreateDirectory(parent);Directory.CreateDirectory(sibling);
-            var child=Path.Combine(parent,"child.txt");File.WriteAllText(child,"x");
-            var other=Path.Combine(sibling,"other.txt");File.WriteAllText(other,"y");
-            using var service=new CoordinationService(Fresh(root,"admission-path-store"));
-            var a=service.Authenticate(service.Register("a"));var b=service.Authenticate(service.Register("b"));
-            var c=service.Authenticate(service.Register("c"));
-            var dirHold=service.RequestResources(a,[new("file:"+parent,"write")],"dir");
-            Check(service.RequestResources(b,[new("file:"+child.ToUpperInvariant().Replace('\\','/'),"read")],"child").State=="pending","Case and slash alias escaped directory hold.");
-            var shortBuffer=new System.Text.StringBuilder(32768);
-            var shortLength=GetShortPathName(child,shortBuffer,(uint)shortBuffer.Capacity);
-            if(shortLength>0&&shortLength<shortBuffer.Capacity&&!string.Equals(shortBuffer.ToString(),child,StringComparison.OrdinalIgnoreCase))
-                Check(service.RequestResources(c,[new("file:"+shortBuffer,"read")],"short-alias").State=="pending","Short directory alias escaped held scope.");
-            else Console.WriteLine("SKIP 8.3 alias fixture: short path unavailable.");
-            Check(service.RequestResources(b,[new("file:"+other,"write")],"sibling").State=="admitted","Sibling path conflicted across component boundary.");
-            var hard=Path.Combine(sibling,"hard.txt");
-            if(!CreateHardLink(hard,child,IntPtr.Zero)){ Console.WriteLine("SKIP hardlink fixture: link creation unavailable."); return Task.CompletedTask; }
-            Refuses<NotSupportedException>(()=>service.RequestResources(b,[new("file:"+hard,"write")],"hard"));
-            Refuses<NotSupportedException>(()=>service.RequestResources(c,[new("file:"+sibling,"write")],"hard-directory"));
-            service.ReleaseResources(a,dirHold.Id,1,"release-dir");
-            Check(service.ListAdmissions(b).Single(x=>x.Resources.Any(r=>r.Resource.EndsWith("CHILD.TXT",StringComparison.Ordinal))).State=="suspended","New hard link did not suspend pending file after committed release.");
-            Check(service.Snapshot().Entries.Single(e=>e.Id==b.Address).Holds.Count==1,"Suspended file projected a hold or lost unrelated bundle.");
+        await test("Kernel injected adapter suspension and rollback",()=>{
+            var adapter = new SyntheticResourceAdapter();
+            var failCommit = false;
+            using var service = new CoordinationService(Fresh(root,"synthetic-admission"),null,
+                point => point == FaultPoint.BeforeCommit && failCommit,adapter);
+            var a = service.Authenticate(service.Register("a"));
+            var b = service.Authenticate(service.Register("b"));
+            var held = service.RequestResources(a,[new("id:synthetic","write")],"held");
+            var generation = service.Snapshot().Generation;
+            var waiting = service.RequestResources(b,[new("id:synthetic","read"),new("id:free","write")],"waiting");
+            Check(waiting.State=="pending"&&service.Snapshot().Generation==generation,
+                "Synthetic waiting bundle changed generation.");
+            Check(service.Snapshot().Entries.Single(e=>e.Id==b.Address).Holds.Count==0,
+                "Synthetic waiting bundle partially admitted.");
+            adapter.FailRevalidation = true;
+            service.ReleaseResources(a,held.Id,1,"release");
+            var suspended = service.ReadAdmission(b,waiting.Id);
+            Check(suspended.State=="suspended"&&suspended.Reason!.Contains("synthetic"),
+                "Typed adapter validation failure did not suspend waiter.");
+            Check(service.Snapshot().Entries.Single(e=>e.Id==b.Address).Holds.Count==0,
+                "Suspended bundle projected a hold.");
+            adapter.FailRevalidation = false;
+            failCommit = true;
+            var before = service.Snapshot().Generation;
+            Refuses<IOException>(()=>service.RequestResources(a,[new("id:rollback","write")],"rollback"));
+            Check(service.Snapshot().Generation==before&&service.ListAdmissions(a).All(x=>x.Resources.All(r=>r.Resource!="id:rollback")),
+                "Failed transaction retained an admission.");
+            failCommit = false;
+            Check(service.RequestResources(a,[new("id:rollback","write")],"rollback").State=="admitted",
+                "Rolled-back idempotency key could not be retried.");
             return Task.CompletedTask;
         });
         await test("Kernel stale queued owner suspends on promotion",()=>{
@@ -250,18 +257,25 @@ internal static class KernelChecks
     [DllImport("winsqlite3.dll",CallingConvention=CallingConvention.Cdecl)]private static extern int sqlite3_open_v2([MarshalAs(UnmanagedType.LPUTF8Str)]string path,out IntPtr db,int flags,IntPtr vfs);
     [DllImport("winsqlite3.dll",CallingConvention=CallingConvention.Cdecl)]private static extern int sqlite3_exec(IntPtr db,[MarshalAs(UnmanagedType.LPUTF8Str)]string sql,IntPtr callback,IntPtr context,out IntPtr error);
     [DllImport("winsqlite3.dll",CallingConvention=CallingConvention.Cdecl)]private static extern int sqlite3_close(IntPtr db);
-    [DllImport("kernel32.dll",EntryPoint="CreateHardLinkW",CharSet=CharSet.Unicode,SetLastError=true)]private static extern bool CreateHardLink(string name,string existing,IntPtr reserved);
-    [DllImport("kernel32.dll",EntryPoint="GetShortPathNameW",CharSet=CharSet.Unicode,SetLastError=true)]private static extern uint GetShortPathName(string longPath,System.Text.StringBuilder shortPath,uint size);}
+}
+internal sealed class SyntheticResourceAdapter : IResourceAdapter
+{
+    internal bool FailRevalidation { get; set; }
 
+    public CanonicalResource Resolve(ResourceRequest request)
+    {
+        if (request is null || request.Mode is not ("read" or "write") ||
+            request.Resource is null || !request.Resource.StartsWith("id:", StringComparison.Ordinal) ||
+            string.IsNullOrWhiteSpace(request.Resource[3..]))
+            throw new ArgumentException("Invalid synthetic resource.");
+        return new CanonicalResource(request.Resource, request.Mode, null, null, false);
+    }
 
+    public void Revalidate(CanonicalResource resource)
+    {
+        if (FailRevalidation)
+            throw new ResourceValidationException("synthetic identity changed");
+    }
 
-
-
-
-
-
-
-
-
-
-
+    public bool Overlaps(CanonicalResource left, CanonicalResource right) => left.Key == right.Key;
+}

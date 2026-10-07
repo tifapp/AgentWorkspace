@@ -1,3 +1,5 @@
+using AgentOS.Core.Adapters;
+
 namespace AgentOS.Core.Coordination;
 
 /// <summary>
@@ -16,10 +18,12 @@ public sealed class CoordinationService : IDisposable
     private readonly CoordinationAdmission _admission;
 
     /// <summary>Opens a fresh root for a trusted in-process host.</summary>
-    public CoordinationService(string root) : this(root, null, null) { }
+    public CoordinationService(string root) : this(root, null, null, null) { }
 
     /// <summary>Internal test seam for process liveness and transaction/export faults.</summary>
-    internal CoordinationService(string root, Func<int,long,bool>? processLiveness, Func<FaultPoint,bool>? fault)
+    internal CoordinationService(string root, Func<int,long,bool>? processLiveness, Func<FaultPoint,bool>? fault) : this(root, processLiveness, fault, null) { }
+
+    internal CoordinationService(string root, Func<int,long,bool>? processLiveness, Func<FaultPoint,bool>? fault, IResourceAdapter? resourceAdapter)
     {
         _store = new CoordinationStore(root, processLiveness, fault);
         try
@@ -28,7 +32,7 @@ public sealed class CoordinationService : IDisposable
             _actions = new CoordinationActions(_store, _identity);
             _messaging = new CoordinationMessaging(_store, _identity);
             _evidence = new CoordinationEvidence(_store);
-            _admission = new CoordinationAdmission(_store, _identity);
+            _admission = new CoordinationAdmission(_store, _identity, resourceAdapter ?? new WindowsResourceAdapter());
             _presentation = new CoordinationPresentation(_store);
             _store.AfterCommit = () => _presentation.RebuildRegistry();
             _store.AfterCommitFailed = error => _presentation.RecordFailure(error);
@@ -72,6 +76,7 @@ public sealed class CoordinationService : IDisposable
     public ExportHealth RebuildRegistry() => _presentation.RebuildRegistry();
     public void Dispose() => _store.Dispose();
 }
+
 
 
 
