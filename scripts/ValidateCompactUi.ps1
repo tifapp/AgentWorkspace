@@ -1,10 +1,12 @@
-param()
+﻿param()
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $paths = @{
     main = Join-Path $repo 'src/AgentOS.App/MainWindow.cs'
     row = Join-Path $repo 'src/AgentOS.App/TaskRow.cs'
     adapter = Join-Path $repo 'src/AgentOS.App/RuntimeUiCommands.cs'
+    preview = Join-Path $repo 'src/AgentOS.App/PreviewData.cs'
+    transcript = Join-Path $repo 'src/AgentOS.App/TranscriptReader.cs'
 }
 foreach ($path in $paths.Values) { if (!(Test-Path -LiteralPath $path)) { throw "Missing compact UI source: $path" } }
 $main = Get-Content -LiteralPath $paths.main -Raw
@@ -32,6 +34,18 @@ foreach ($id in @('CancelTask','CodexReport','SendFollowUp','TaskDecision')) {
 }
 Require $row 'reportExpander' 'expandable result'
 Require $row 'ClearReply\(' 'successful follow-up draft clearing'
+Require $main 'using Microsoft\.UI\.Xaml\.Automation\.Peers;' 'automation peer import'
+Require $row 'using Microsoft\.UI\.Xaml\.Automation\.Peers;' 'row automation peer import'
+Require $main 'ApplySnapshot\(ProjectState state\)' 'shared snapshot patch'
+Require $main 'PreviewData\.Create' 'preview fixture path'
+Require $main '"PreviewUpdate"' 'preview update control'
+Require $main 'ShowPreviewSettings' 'preview settings guard'
+Require $main 'TranscriptReader\.ReadAsync' 'transcript reader'
+Require $row 'reportExpander\.Header=snippet' 'result preview header'
+Require $row 'replyArea\.Visibility=Visibility\.Collapsed' 'collapsed follow-up composer'
+Require $row 'KeyboardAccelerator.*VirtualKey\.Enter' 'follow-up keyboard send'
+Require (Get-Content $paths.preview -Raw) 'preview-completed|preview-running|preview-unknown' 'preview status fixture'
+Require (Get-Content $paths.transcript -Raw) 'FileShare\.ReadWrite' 'shared transcript read'
 Write-Output 'Compact UI structural checks passed. This does not build or render the app.'
 
 $maps = Get-Content -LiteralPath (Join-Path $repo 'src/AgentOS.Core/TaskMaps.cs') -Raw
@@ -56,3 +70,4 @@ foreach($relative in @('docs/product-objective.md','docs/implementation-plan.md'
  Require (Get-Content -LiteralPath (Join-Path $repo $relative) -Raw) 'Phone work is deferred and explicitly excluded' "$relative phone exclusion"
 }
 Write-Output 'Draft-map and phone-boundary structural checks passed. Native compilation and execution remain unverified.'
+

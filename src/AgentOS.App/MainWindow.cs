@@ -1,6 +1,6 @@
-using AgentOS.Core;
+﻿using AgentOS.Core;
 using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
@@ -17,9 +17,9 @@ public sealed class MainWindow : Window
     readonly StackPanel tree = new() { Spacing = 8 };
     readonly ScrollViewer map = new() { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
     readonly ScrollViewer detail = new() { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
-    readonly StackPanel detailBody = new() { Spacing = 10 };
-    readonly TextBlock projectName = Label("Open a project",18,true), summary = Label("",12);
-    readonly TextBlock detailHeading = Label("",18,true), detailStatus = Label("",13);
+    readonly StackPanel detailBody = new() { Spacing = 10 }; readonly StackPanel composer = new() { Spacing = 5 }; readonly TextBlock emptyHint = Label("No tasks yet. Describe a change below to start your first task.",13);
+    readonly TextBlock projectName = Label("Open a project",18,true), summary = Label("",12); readonly Button projectButton = new(); readonly TextBlock previewBadge = Label("UI preview — sample data",12,true);
+    readonly TextBlock detailHeading = Label("",18,true), detailStatus = Label("",13); TextBox? detailReport; readonly TextBlock liveTranscript = Label("Open to load agent messages.",12); readonly Expander transcriptExpander = new() { Header = "Live transcript" };
     readonly Button decisions = new() { Content = "Decisions" };
     readonly InfoBar notice = new() { IsOpen = false, IsClosable = true };
     readonly TextBox prompt = new() { Header = "New task", PlaceholderText = "Describe the change and how to check it", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = 72, MaxHeight = 136 };
@@ -30,7 +30,7 @@ public sealed class MainWindow : Window
     readonly Dictionary<string, TaskRow> rows = new();
     readonly string settings = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"AgentOS","desktop.json");
     ProjectRuntime? runtime; ProjectState? snapshot; string? dataRoot, selected;
-    long generation = -1; bool closing, detailsOpen, wide, walkthrough;
+    long generation = -1; bool closing, detailsOpen, wide, walkthrough, previewUpdated, previewEmpty; readonly bool previewMode = Environment.GetCommandLineArgs().Contains("--ui-preview"); string? selectedBeforeDetails;
 
     public MainWindow()
     {
@@ -39,47 +39,53 @@ public sealed class MainWindow : Window
         root.RowDefinitions.Add(new(){Height=GridLength.Auto});
         root.RowDefinitions.Add(new(){Height=new GridLength(1,GridUnitType.Star)});
         root.RowDefinitions.Add(new(){Height=GridLength.Auto});
-        var header = new Grid{ColumnSpacing=8};
-        header.ColumnDefinitions.Add(new(){Width=new GridLength(1,GridUnitType.Star)});
-        header.ColumnDefinitions.Add(new(){Width=GridLength.Auto});
-        var identity = new StackPanel{Spacing=1}; identity.Children.Add(projectName); identity.Children.Add(summary); header.Children.Add(identity);
-        var controls = new StackPanel{Orientation=Orientation.Horizontal,Spacing=6};
-        controls.Children.Add(Action("Project",ShowSettings,"ProjectChooser"));
-        controls.Children.Add(Action("Settings",ShowSettings,"Settings"));
-        controls.Children.Add(Action("Maps",ShowMaps,"TaskMaps"));
+        var header = new FlowPanel();
+        var identity = new StackPanel{Spacing=1};
+        projectButton.Content=projectName;projectButton.Click+=async(_,_)=>await Guard(ShowSettings);
+        AutomationProperties.SetAutomationId(projectButton,"ProjectChooser");
+        identity.Children.Add(projectButton);identity.Children.Add(summary);identity.Children.Add(previewBadge);
+        previewBadge.Visibility=Visibility.Collapsed;header.Children.Add(identity);
+        var controls = new FlowPanel();
+        var settingsButton=Action("Settings",ShowSettings,"Settings");settingsButton.Content="⚙ Settings";AutomationProperties.SetName(settingsButton,"Settings");controls.Children.Add(settingsButton);
+
         decisions.Click += (_,_) => ShowDecisionMenu();
         AutomationProperties.SetAutomationId(decisions,"PendingDecisions"); controls.Children.Add(decisions);
-        Grid.SetColumn(controls,1); header.Children.Add(controls); root.Children.Add(header);
+        if(previewMode)
+        {
+            controls.Children.Add(Action("Update sample",()=>{previewUpdated=!previewUpdated;ApplySnapshot(PreviewData.Create(previewUpdated,previewEmpty));return Task.CompletedTask;},"PreviewUpdate"));
+            controls.Children.Add(Action("Toggle empty",()=>{previewEmpty=!previewEmpty;ApplySnapshot(PreviewData.Create(previewUpdated,previewEmpty));return Task.CompletedTask;},"PreviewReset"));
+        }
+        header.Children.Add(controls);root.Children.Add(header);
         Grid.SetRow(notice,1); root.Children.Add(notice);
         map.Content=tree; AutomationProperties.SetAutomationId(map,"WorkList");
         surface.ColumnDefinitions.Add(new(){Width=new GridLength(1,GridUnitType.Star)});
         surface.ColumnDefinitions.Add(new(){Width=new GridLength(0)});
         surface.Children.Add(map); detail.Content=detailBody; Grid.SetColumn(detail,1); surface.Children.Add(detail);
         Grid.SetRow(surface,2); root.Children.Add(surface);
-        var composer=new StackPanel{Spacing=5}; composer.Children.Add(prompt);
+        composer.Children.Add(prompt);
         var actions=new StackPanel{Orientation=Orientation.Horizontal,Spacing=6};
-        actions.Children.Add(Action("Send",SendTask,"StartTask",true));
+        var start=Action("Send",SendTask,"StartTask",true);start.IsEnabled=!previewMode;actions.Children.Add(start);
         var options=new Button{Content="Options",Flyout=new Flyout{Content=auto}};
         AutomationProperties.SetName(options,"Task options: automatic integration"); ToolTipService.SetToolTip(options,"Choose automatic validation and integration"); actions.Children.Add(options);
         composer.Children.Add(actions); Grid.SetRow(composer,3); root.Children.Add(composer);
-        Content=root;
+        root.Background=Application.Current.Resources["ApplicationPageBackgroundThemeBrush"] as Brush;Content=root;
         AutomationProperties.SetAutomationId(prompt,"TaskPrompt");
         ToolTipService.SetToolTip(prompt,"Ctrl+N focuses this field. Ctrl+Enter sends this task.");
         AutomationProperties.SetAutomationId(projectPath,"ProjectPath");
         AutomationProperties.SetAutomationId(validation,"ValidationCommand");
         root.SizeChanged+=(_,e)=>{wide=e.NewSize.Width>=1000; ArrangeDetails();};
         Shortcut(VirtualKey.N,VirtualKeyModifiers.Control,()=>prompt.Focus(FocusState.Programmatic));
-        Shortcut(VirtualKey.Enter,VirtualKeyModifiers.Control,()=>{if(prompt.FocusState!=FocusState.Unfocused)_=Guard(SendTask);});
-        Shortcut(VirtualKey.Escape,VirtualKeyModifiers.None,()=>{detailsOpen=false; ArrangeDetails(); notice.IsOpen=false;});
+        Shortcut(VirtualKey.Enter,VirtualKeyModifiers.Control,()=>{if(prompt.FocusState!=FocusState.Unfocused&&!previewMode)_=Guard(SendTask);});
+        Shortcut(VirtualKey.Escape,VirtualKeyModifiers.None,()=>{CloseDetails();notice.IsOpen=false;});
         AppWindow.Closing+=async (_,e)=>{if(closing)return; e.Cancel=true; closing=true; timer.Stop(); if(runtime!=null)await runtime.DisposeAsync(); Close();};
-        timer.Tick+=(_,_)=>Refresh(); timer.Start();
+        timer.Tick+=async(_,_)=>{Refresh();if(detailsOpen&&transcriptExpander.IsExpanded)await LoadTranscript();}; timer.Start(); transcriptExpander.Content=liveTranscript;transcriptExpander.Expanding+=async(_,_)=>await LoadTranscript();
         root.Loaded+=async (_,_)=>await Guard(Initialize);
     }
     void Shortcut(VirtualKey key,VirtualKeyModifiers modifiers,Action action)
     {var a=new KeyboardAccelerator{Key=key,Modifiers=modifiers}; a.Invoked+=(_,e)=>{action();e.Handled=true;}; root.KeyboardAccelerators.Add(a);}
     async Task Initialize()
     {
-        var args=Environment.GetCommandLineArgs();
+        var args=Environment.GetCommandLineArgs(); if(previewMode){previewBadge.Visibility=Visibility.Visible;projectName.Text="Sample project";ApplySnapshot(PreviewData.Create());return;}
         for(int i=1;i+1<args.Length;i++){if(args[i]=="--project")projectPath.Text=args[++i];else if(args[i]=="--data-root")dataRoot=args[++i];}
         if(string.IsNullOrWhiteSpace(projectPath.Text)&&File.Exists(settings))
         {using var doc=JsonDocument.Parse(await File.ReadAllTextAsync(settings));
@@ -103,8 +109,8 @@ public sealed class MainWindow : Window
 
     async Task ShowSettings()
     {
-        var body=new StackPanel{Spacing=12};
-        body.Children.Add(projectPath);
+        if(previewMode){await ShowPreviewSettings();return;} var body=new StackPanel{Spacing=12};
+        Detach(projectPath);Detach(validation);body.Children.Add(projectPath);
         body.Children.Add(Row(Action("Browse…",Browse,"BrowseProject"),Action("Open project",OpenProject,"OpenProject")));
         body.Children.Add(validation);
         body.Children.Add(Action("Save setup",()=>{RequireRuntime().Configure(validation.Text,HostDiscovery.FindCodex());Notice("Setup saved","Validation command saved.");return Task.CompletedTask;},"SaveSetup"));
@@ -114,14 +120,16 @@ public sealed class MainWindow : Window
         body.Children.Add(Action("Check prerequisites",async()=>{checks.Children.Clear();foreach(var c in await HostDiscovery.CheckAsync())checks.Children.Add(Label((c.Ready?"Ready: ":"Action needed: ")+c.Name+" — "+c.Detail,12));},"CheckPrerequisites"));
         var advanced=new StackPanel{Spacing=8};
         advanced.Children.Add(Label(ProjectRuntime.Coverage,12));
+        advanced.Children.Add(Action("Maps",ShowMaps,"TaskMaps"));
         advanced.Children.Add(Action("Create practice project",CreatePractice,"CreatePractice"));
         advanced.Children.Add(Action("Run concurrency check",Walkthrough,"RunWalkthrough"));
         advanced.Children.Add(Action("Open evidence folder",()=>OpenPath(RequireRuntime().DataDirectory),"OpenEvidenceFolder"));
         advanced.Children.Add(Action("Open project folder",()=>OpenPath(RequireRuntime().Snapshot.ProjectPath),"OpenProjectFolder"));
         body.Children.Add(new Expander{Header="Advanced: coverage, practice and concurrency",Content=advanced});
         var dialog=new ContentDialog{Title="Project settings",Content=new ScrollViewer{Content=body,MaxHeight=540,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled},CloseButtonText="Close",XamlRoot=root.XamlRoot};
-        await dialog.ShowAsync();
+        try{await dialog.ShowAsync();}finally{body.Children.Remove(projectPath);body.Children.Remove(validation);}
     }
+    async Task ShowPreviewSettings(){var dialog=new ContentDialog{Title="Project settings · UI preview",Content=Label("Sample project. Actions are unavailable in preview.",13),CloseButtonText="Close",XamlRoot=root.XamlRoot};await dialog.ShowAsync();}
     async Task ShowMaps()
     {
         var r=RequireRuntime();
@@ -171,32 +179,39 @@ public sealed class MainWindow : Window
         finally{walkthrough=false;}
     }
     async Task SendTask()
-    {var value=prompt.Text;var id=await Commands.Start(value,auto.IsChecked==true);prompt.Text="";selected=id;Refresh();}
+    {if(previewMode)return;var value=prompt.Text;var id=await Commands.Start(value,auto.IsChecked==true);prompt.Text="";selected=id;Refresh();}
     async Task SendFollowUp(string parentId,string value)
-    {var id=await Commands.Start(value,auto.IsChecked==true,parentId);rows[parentId].ClearReply();selected=id;Refresh();}
+    {if(previewMode)return;var id=await Commands.Start(value,auto.IsChecked==true,parentId);rows[parentId].ClearReply();selected=id;Refresh();}
     void Refresh()
     {
         if(runtime==null)return;
         var state=runtime.Snapshot;if(state.Generation==generation)return;
+        ApplySnapshot(state);
+    }
+    void ApplySnapshot(ProjectState state)
+    {
         generation=state.Generation;snapshot=state;
+        if(state.Work.Count==0&&detailsOpen)CloseDetails();
         var pending=state.Decisions.Count(x=>x.Status==DecisionStatus.Pending);
         summary.Text=$"{state.Work.Count(x=>x.IsActive)} active · {state.Work.Count(x=>x.Status==WorkStatus.Completed)} completed";
         AutomationProperties.SetLiveSetting(summary,AutomationLiveSetting.Polite);
-        decisions.Content=pending==0?"Decisions":$"Decisions ({pending})";decisions.IsEnabled=pending>0;
+        decisions.Content=pending==0?"Decisions":$"Decisions ({pending})";decisions.IsEnabled=pending>0&&!previewMode;
         var scrollOffset=map.VerticalOffset;
         var live=state.Work.Select(x=>x.Id).ToHashSet();
-        foreach(var id in rows.Keys.Where(x=>!live.Contains(x)).ToArray())
-        {var row=rows[id];if(row.Root.Parent is Panel p)p.Children.Remove(row.Root);rows.Remove(id);}
+        foreach(var id in rows.Keys.Where(x=>!live.Contains(x)).ToArray()){var row=rows[id];if(row.Root.Parent is Panel p)p.Children.Remove(row.Root);rows.Remove(id);}
         foreach(var work in state.Work)
         {
             if(!rows.TryGetValue(work.Id,out var row))
-            {row=new TaskRow(work.Id,id=>OpenDetails(id),(id,value)=>Guard(()=>SendFollowUp(id,value)),id=>Guard(()=>{Commands.Stop(id);return Task.CompletedTask;}),id=>Guard(()=>ShowWorkDecision(id)),()=>RowMenu(work.Id));rows.Add(work.Id,row);}
+            {row=new TaskRow(work.Id,id=>OpenDetails(id),(id,value)=>Guard(()=>SendFollowUp(id,value)),id=>Guard(()=>{Commands.Stop(id);return Task.CompletedTask;}),id=>Guard(()=>ShowWorkDecision(id)),()=>RowMenu(work.Id),()=>auto.IsChecked==true,value=>auto.IsChecked=value,previewMode);rows.Add(work.Id,row);}
             row.Patch(work,state.Decisions.Any(x=>x.WorkId==work.Id&&x.Status==DecisionStatus.Pending));
         }
+        if(!tree.Children.Contains(emptyHint))tree.Children.Add(emptyHint);
+        emptyHint.Text=previewMode?"Sample map is empty. Use Toggle empty to restore sample tasks.":"No tasks yet. Describe a change below to start your first task.";
+        emptyHint.Visibility=state.Work.Count==0?Visibility.Visible:Visibility.Collapsed;
         Reconcile(tree,state.Work.Where(x=>x.ParentId==null||!rows.ContainsKey(x.ParentId)).Reverse().Select(x=>x.Id).ToArray());
         foreach(var work in state.Work){Reconcile(rows[work.Id].Children,state.Work.Where(x=>x.ParentId==work.Id).Select(x=>x.Id).ToArray());rows[work.Id].UpdateChildren();}
         DispatcherQueue.TryEnqueue(()=>{if(Math.Abs(map.VerticalOffset-scrollOffset)>1)map.ChangeView(null,scrollOffset,null,true);});
-        if(detailsOpen){var shown=state.Work.FirstOrDefault(x=>x.Id==selected);if(shown!=null){detailHeading.Text=shown.StatusLabel+" · "+shown.ShortTask;detailStatus.Text=shown.Detail;}}
+        if(detailsOpen){var shown=state.Work.FirstOrDefault(x=>x.Id==selected);if(shown!=null){detailHeading.Text=shown.StatusLabel+" · "+shown.ShortTask;detailStatus.Text=shown.Detail;if(detailReport!=null&&detailReport.Text!=(shown.CodexReport??""))detailReport.Text=shown.CodexReport??"";}}
     }
     void Reconcile(StackPanel parent,string[] ids)
     {
@@ -207,28 +222,28 @@ public sealed class MainWindow : Window
          if(current>=0)parent.Children.RemoveAt(current);
          parent.Children.Insert(i,target);}
     }
-    void OpenDetails(string id){selected=id;detailsOpen=true;DrawDetails();ArrangeDetails();}
+    void OpenDetails(string id){selected=id;selectedBeforeDetails=id;detailsOpen=true;DrawDetails();ArrangeDetails();} void CloseDetails(){detailsOpen=false;ArrangeDetails();if(selectedBeforeDetails!=null&&rows.TryGetValue(selectedBeforeDetails,out var row))row.FocusDetails();}
     void ArrangeDetails()
     {
         surface.ColumnDefinitions[0].Width=new GridLength(detailsOpen&&wide?0.55:1,GridUnitType.Star);
         surface.ColumnDefinitions[1].Width=new GridLength(detailsOpen?(wide?0.45:1):0,GridUnitType.Star);
-        map.Visibility=detailsOpen&&!wide?Visibility.Collapsed:Visibility.Visible;
+        map.Visibility=detailsOpen&&!wide?Visibility.Collapsed:Visibility.Visible; composer.Visibility=detailsOpen&&!wide?Visibility.Collapsed:Visibility.Visible;
         detail.Visibility=detailsOpen?Visibility.Visible:Visibility.Collapsed;
     }
 
     void DrawDetails()
     {
-        detailBody.Children.Clear();
+        detailBody.Children.Clear();detailReport=null;
         var work=snapshot?.Work.FirstOrDefault(x=>x.Id==selected);if(work==null)return;
-        detailBody.Children.Add(Row(Action("Back",()=>{detailsOpen=false;ArrangeDetails();return Task.CompletedTask;},"BackToTasks"),Action("Refresh details",()=>{DrawDetails();return Task.CompletedTask;},"RefreshDetails")));
+        detailBody.Children.Add(Row(Action("Back",()=>{CloseDetails();return Task.CompletedTask;},"BackToTasks"),Action("Refresh details",()=>{DrawDetails();return Task.CompletedTask;},"RefreshDetails")));
         detailHeading.Text=work.StatusLabel+" · "+work.ShortTask;detailBody.Children.Add(detailHeading);
         detailStatus.Text=work.Detail;detailBody.Children.Add(detailStatus);
         if(work.ParentId!=null&&snapshot!.Work.FirstOrDefault(x=>x.Id==work.ParentId) is { } original)
             detailBody.Children.Add(Action("Parent task",()=>{OpenDetails(original.Id);return Task.CompletedTask;},"OriginalTask"));
         foreach(var child in snapshot!.Work.Where(x=>x.ParentId==work.Id))
             detailBody.Children.Add(Action("Child task · "+child.StatusLabel,()=>{OpenDetails(child.Id);return Task.CompletedTask;},"RevisionTask"));
-        detailBody.Children.Add(Card("Full prompt",ReadOnly(work.Task,200)));
-        if(!string.IsNullOrWhiteSpace(work.CodexReport))detailBody.Children.Add(Card("Full report",ReadOnly(work.CodexReport,300)));
+        detailBody.Children.Add(Card("Full prompt",ReadOnly(work.Task,200))); if(work.IsActive&&!previewMode)detailBody.Children.Add(transcriptExpander);
+        if(!string.IsNullOrWhiteSpace(work.CodexReport)){detailReport=ReadOnly(work.CodexReport,300);detailBody.Children.Add(Card("Full report",detailReport));}
         if(work.ChangedPaths.Count>0)detailBody.Children.Add(Card("Changed files",ReadOnly(string.Join(Environment.NewLine,work.ChangedPaths),160)));
         if(!string.IsNullOrWhiteSpace(work.Diff))detailBody.Children.Add(Card("Candidate diff",ReadOnly(work.Diff,300)));
         if(work.IntegratedCommit!=null)detailBody.Children.Add(Label("Integrated commit: "+work.IntegratedCommit,12));
@@ -236,18 +251,19 @@ public sealed class MainWindow : Window
         {var panel=new StackPanel{Spacing=5};
          panel.Children.Add(Label($"{evidence.TestedAt.LocalDateTime:g} · exit {evidence.ExitCode} · {(evidence.Passed?"passed":"failed")}",12));
          panel.Children.Add(ReadOnly($"Commit {evidence.Commit}\nTree {evidence.Tree}\nBased on {evidence.AgainstCommit}\n{evidence.Command}\n{evidence.Environment}",170));
-         panel.Children.Add(Action("Open validation log",()=>OpenPath(evidence.LogPath),"OpenValidationLog"));
+         if(!previewMode)panel.Children.Add(Action("Open validation log",()=>OpenPath(evidence.LogPath),"OpenValidationLog"));
          detailBody.Children.Add(Card("Validation evidence",panel));}
         detailBody.Children.Add(Label("Recent activity",15,true));
         foreach(var entry in snapshot!.Events.Where(x=>x.WorkId==work.Id).TakeLast(20).Reverse())
             detailBody.Children.Add(Label(entry.At.ToLocalTime().ToString("g")+" · "+entry.Message,12));
     }
+    async Task LoadTranscript(){if(previewMode||selected==null||!detailsOpen||!transcriptExpander.IsExpanded)return;var id=selected;var text=await TranscriptReader.ReadAsync(Commands.Transcript(id));if(selected==id&&liveTranscript.Text!=text)liveTranscript.Text=text;}
     MenuFlyout RowMenu(string id)
     {
         var menu=new MenuFlyout();var work=snapshot?.Work.FirstOrDefault(x=>x.Id==id);if(work==null)return menu;
         void Add(string title,Func<Task> action,string automationId)
         {var item=new MenuFlyoutItem{Text=title};AutomationProperties.SetAutomationId(item,automationId);item.Click+=async(_,_)=>await Guard(action);menu.Items.Add(item);}
-        if(work.IsActive)Add("Stop task",()=>{Commands.Stop(id);return Task.CompletedTask;},"CancelTask");
+        if(previewMode)return menu; if(work.IsActive)Add("Stop task",()=>{Commands.Stop(id);return Task.CompletedTask;},"CancelTask");
         if(work.Status==WorkStatus.Private)Add("Integrate candidate",()=>Commands.Integrate(id),"IntegrateCandidate");
         if(!work.IsActive)Add("Revise with Codex",async()=>{selected=await Commands.Revise(id);Refresh();},"ReviseTask");
         if(work.Status==WorkStatus.Completed)Add("Prepare release decision",async()=>{await Commands.PrepareRelease(id);Refresh();},"PrepareRelease");
@@ -291,7 +307,7 @@ public sealed class MainWindow : Window
         await dialog.ShowAsync();
         Refresh();
     }
-    static void Detach(UIElement element){if(Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(element) is Panel panel)panel.Children.Remove(element);}
+    static void Detach(UIElement element){var parent=Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(element);if(parent is Panel panel)panel.Children.Remove(element);else if(parent is ContentControl control)control.Content=null;}
     RuntimeUiCommands Commands=>new(RequireRuntime());
     ProjectRuntime RequireRuntime()=>runtime??throw new InvalidOperationException("Open a project in Settings first.");
     static Task OpenPath(string path)
@@ -317,6 +333,11 @@ public sealed class MainWindow : Window
     static Border Card(string title,UIElement content)
     {var stack=new StackPanel{Spacing=5};stack.Children.Add(Label(title,13,true));stack.Children.Add(content);return new Border{Child=stack,Padding=new Thickness(10),CornerRadius=new CornerRadius(6),BorderThickness=new Thickness(1),Background=Application.Current.Resources["CardBackgroundFillColorDefaultBrush"] as Brush,BorderBrush=Application.Current.Resources["CardStrokeColorDefaultBrush"] as Brush};}
 }
+
+
+
+
+
 
 
 
