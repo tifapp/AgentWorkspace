@@ -66,6 +66,7 @@ async Task<ProjectRuntime> NewRuntime()
 static WorkUnit Work(ProjectRuntime runtime, string id) => runtime.Snapshot.Work.Single(w => w.Id == id);
 async Task TestAsync(string name, Func<Task> check) => await Test(name, check);
 await UpdateProtocolChecks.Run(Test, NewRuntime, root);
+await AgentOS.Tests.ConflictBehaviorChecks.RunAsync(Test, Path.Combine(root, "conflict-behavior"));
 
 // Feature helpers are independent gates. Missing concurrent helpers are reported, never counted as passes.
 await TestAsync("Resource admission and VM refusal", AgentOS.Tests.ResourceAdmissionChecks.RunAsync);
@@ -161,6 +162,12 @@ await Test("Peer delivery, exact interrupt, cancelable wait and human escalation
         aId = await r.StartAsync("Start-Sleep -Seconds 12");
         bId = await r.StartAsync("Start-Sleep -Seconds 12");
         await Eventually(() => Work(r, aId).Status == WorkStatus.Running && Work(r, bId).Status == WorkStatus.Running);
+        var unknownTarget = Guid.NewGuid().ToString("N");
+        Assert(r.Snapshot.PeerMessages.Count == 0 && r.Snapshot.InterruptRequests.Count == 0, "Coordination happened before explicit request.");
+        var badMessageTarget = false; try { r.SendPeerMessage(aId, unknownTarget, "wrong target"); } catch (InvalidOperationException) { badMessageTarget = true; }
+        Assert(badMessageTarget && r.Snapshot.PeerMessages.Count == 0, "Peer message accepted an unknown target.");
+        var badInterruptTarget = false; try { r.InterruptManagedTask(aId, unknownTarget, "wrong target"); } catch (InvalidOperationException) { badInterruptTarget = true; }
+        Assert(badInterruptTarget && r.Snapshot.InterruptRequests.Count == 0, "Interrupt accepted an unknown target.");
         var message = r.SendPeerMessage(aId, bId, "Please preserve the shared setting."); messageId = message.Id;
         Assert(r.PendingPeerMessages(bId).Single().Id == messageId, "Peer message was not queued.");
         r.MarkPeerDelivered(bId, messageId);
@@ -170,12 +177,12 @@ await Test("Peer delivery, exact interrupt, cancelable wait and human escalation
         var state = (ProjectState)typeof(ProjectRuntime).GetField("_state", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(r)!;
         var notice = new ConflictNotice { WorkId = aId, Cause = "TouchedPathChanged", Paths = ["settings.json"] };
         state.Conflicts.Add(notice);
+        r.RespondToConflict(aId, notice.Id, "I need a human decision about ownership.");
         escalationId = r.EscalateConflict(aId, notice.Id, "Need a human decision about ownership.").Id;
         interruptId = r.InterruptManagedTask(aId, bId, "Stop this exact managed task.").Id;
         await r.WaitForIdleAsync();
         Assert(r.Snapshot.InterruptRequests.Single(x => x.Id == interruptId).TargetWorkId == bId, "Interrupt targeted the wrong task.");
-        Assert(r.Snapshot.Conflicts.Single(x => x.Id == notice.Id).Response == null, "Coordinator fabricated a conflict response.");
-        r.RespondToConflict(aId, notice.Id, "I will abandon the deferred change.");
+        Assert(r.Snapshot.Conflicts.Single(x => x.Id == notice.Id).Response == "I need a human decision about ownership.", "Coordinator changed the explicit conflict response.");
         r.AbandonConflict(aId, notice.Id, "Explicitly abandon it.");
         Assert(r.Snapshot.Conflicts.Single(x => x.Id == notice.Id).Abandoned, "Explicit abandonment was not retained.");
     }
@@ -518,6 +525,8 @@ await Test("External ref change during validation refuses compare-and-swap", asy
     await integration;
     Assert(Work(r, id).Status == WorkStatus.NeedsResponse && Work(r, id).Evidence.Single().Passed, "A changed shared ref published tested work under stale assumptions.");
     Assert(r.Snapshot.Conflicts.Single(x => x.WorkId == id).Cause == "UpdateRefRace", "CAS race lost exact cause.");
+    var raceNotice = r.Snapshot.Conflicts.Single(x => x.WorkId == id);
+    Assert(raceNotice.DeferredCandidateCommit == Work(r, id).CandidateCommit && (await Commands.Git(r.Snapshot.ProjectPath, "rev-parse", "refs/agent-os/deferred/" + raceNotice.Id)).Checked() == Work(r, id).CandidateCommit, "CAS race lost its retained candidate ref.");
 });
 
 await Test("Unicode survives the Windows process adapter", async () =>

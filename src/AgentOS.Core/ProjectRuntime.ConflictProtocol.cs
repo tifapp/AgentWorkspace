@@ -72,6 +72,7 @@ public sealed partial class ProjectRuntime
     {
         if (string.IsNullOrWhiteSpace(explanation)) throw new ArgumentException("Escalation explanation is required.");
         var notice = FindConflict(workId, conflictId);
+        if (notice.Response == null) throw new InvalidOperationException("Respond first.");
         var item = new HumanEscalation { WorkId = workId, ConflictId = notice.Id, Explanation = explanation.Trim() };
         Mutate(() => { _state.Escalations.Add(item); Event(workId, "HumanEscalation", item.Explanation); });
         return JsonFormat.Copy(item);
