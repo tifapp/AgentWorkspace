@@ -1,35 +1,19 @@
-# Testing agent-os
+# Testing the integrated Windows source
 
-Run `scripts/build.ps1 -Test -Publish` on a Windows x64 machine. The executable integration suite uses real Git repositories, PowerShell commands, Windows Job Objects, and durable runtime state. Its internal script fixture is not a selectable application host and makes no model calls. Exit code 0 means all assertions passed. Failed assertions include retained paths and errors in `results.json`.
-
-The important checks cover private file/index separation; actual contended integration and stale refusal; independent combined validation; failed tests and changed validation inputs; scoped decisions and non-repetition; queued cancellation; descendant cleanup; unknown host outcomes; exclusive runtime ownership; a killed runtime with a surviving child; lost integration acknowledgement; changed evidence; the demonstrated lack of arbitrary-shell confinement; automatic stale revision; external ref races; Unicode; and corrupt state.
-
-For real Codex behavior, run either the app's **Run concurrency check** on a newly created practice project or:
+Use the pinned .NET 10 SDK on a native Windows host for compilation and runtime acceptance. `scripts/build.ps1 -Test -Publish` builds App and CLI, runs the executable integration suite and publishes the integrated side-by-side portable folder/ZIP. It does not install MSIX or alter the historical retirement bundle. `scripts/source-manifest.ps1` hashes nonignored source and records Git HEAD; HEAD alone does not identify uncommitted tested content.
 
 ```powershell
-.\.tools\dotnet\dotnet.exe run --project src/AgentOS.Cli -- walkthrough artifacts/live artifacts/live-state
+.\scripts\build.ps1 -Test -Publish
+.\scripts\ValidateCompactUi.ps1
+.\scripts\source-manifest.ps1
 ```
 
-For repeatable desktop validation against the published executable:
+The source validation gate and `ValidateCompactUi.ps1` check structure only. They do not compile, launch, exercise native UI, or prove rendering. Native root verification is separate from AppContainer-mediated commands. The exact archived `0d8a7e9bc9ead47b21b3f2495483ee7c0f134613` source passed 71/71 through compiled `Tests.exe` with the archive as cwd. Results: `artifacts/integration-final-regression/results.json`; source and DLL hashes: `artifacts/integration-native-acceptance-evidence.json`. The results JSON source field inherited parent checkout 9d and does not identify the tested archive.
 
-```powershell
-.\scripts\test-desktop.ps1 -Live
-```
+Tests requiring machine coordination must inject an explicit isolated artifact-root `MachineCoordinator`. Do not use the user's default journal as a fixture: the schema-2 upgrade and active owners can conflict with an installed schema-1 CLI. Run the suite with compiled `Tests.exe` or `dotnet run --project tests/AgentOS.Tests -c Release -- <artifact-root>`. DLL-only invocation is invalid for child-process fixtures. Keep each result JSON with its source manifest and exact binary identity.
 
-The desktop check uses Windows UI Automation to save setup, launch three real Codex tasks, observe completed and stale candidates, inspect a revision, approve a scoped release, verify its Git tag, view evidence at wide/narrow window sizes, cancel work, and restart. It needs an interactive desktop and authenticated Codex. It consumes normal Codex account usage. It saves its screenshots, exact app/core hashes, runtime state, checks and errors under `artifacts/verification/desktop`. Close other verification windows first; the script targets the process it launches.
+The suite exercises real Git repositories, PowerShell and process trees, plus injected SDK/external adapter fixtures. Passing injected tests does not prove a real Hyper-V VM, live GitHub, PostgreSQL or deployment effect. This host has no `vmcompute` or signing certificate. Native SDK commands in product require an available frozen Hyper-V profile, nonadministrator worker, exact collector receipt and shutdown proof; no host fallback exists.
 
-If a desktop automation interruption occurs after its cancellation check finishes, `-Resume -Output <same-output-folder>` verifies restart and final contents against the retained project without launching more model work. Keep the earlier report when recording checks performed across multiple builds.
+For desktop controls, native App build 73d completed with zero warnings and errors. UI Automation located controls and checked bounds at wide and narrow preview sizes. Both current-session and retained 3fbb baseline screenshots are blank; do not report visual rendering as passed. The owned external WinForms fixture at `artifacts/capture-fixture/evidence.json` verified HWND/PID identity, UIA text, exact 100 x 80 crop and hotkey conflict/cleanup. Authenticated synthetic Codex drafting evidence at `artifacts/context-live/candidate-evidence.json` verified a foreground-derived title, three suggestions and three nodes, without transmitting a real user window or screenshot.
 
-`scripts/source-manifest.ps1` records SHA-256 hashes of all nonignored repository files and the starting Git HEAD. This includes uncommitted implementation, so the starting commit alone is never described as the code tested. Build and test artifacts are ignored by Git but retained locally. The final validation report points to these artifacts and states platform limits.
-
-To reproduce crash handling in isolation, the suite launches its own runtime child, waits for a real descendant PID file, kills only the runtime parent, observes that the descendant is gone, and reopens the durable state. The lost-response test saves a publication intent around an actual completed ref update and proves that recovery identifies the existing commit rather than creating another.
-
-The boundary test intentionally writes from an internal unconstrained fixture process outside its private clone into its own disposable test project's checkout. This negative control proves that process lifecycle containment alone does not establish a security sandbox. The shipped ManagedCodexHost instead uses the AppContainer boundary. Positive controls prove an ordinary WMI writer can create the disposable file, while the managed command cannot use that route. Other checks prove outside-source writes and a connection to an actual listening socket are denied, child writers stop, and Unicode output survives.
-
-The current 34-check suite also covers machine-wide same-resource waits and independent resources, dead-owner recovery, trusted-command descendants, hardlink rejection, real shared SQLite transactions, occupied preview ports and exact cleanup, broker launch deduplication through restart, policy preservation and custom data-root discovery. Final results are under `artifacts/retirement/tests-final-acceptance`.
-
-`scripts/compare-coordination.ps1` compares matching no-op child operations with manual registry commands, the automated legacy wrapper and runtime-derived admission. It measures coordination overhead only. `scripts/test-retirement.ps1 -Output <fresh-artifact-folder>` copies the still-protected legacy installation into a disposable fixture, verifies refusal while other work exists, then verifies frozen legacy clients. It does not change the real installation. Actual retirement is evidence gated by `scripts/retire-resource-checkin.ps1`; see the receipt before attempting a migration or rollback.
-
-Two Windows persistence regressions are also covered: a concurrent state reader that omits delete sharing must not break an atomic save, and a failed output-persistence callback must stop its producer promptly. The reader regression failed with `UnauthorizedAccessException` before the bounded replace retry was added. The same fix is exercised by the desktop check's continuous state reads.
-
-The supplied edge-case catalogue and task-map images are mapped in [reference-coverage.md](reference-coverage.md). Additional executable tests cover directory replacement versus a conflicting child and an independent prefix sibling, case-variant paths, concurrent equivalent decisions, cleanup beside a live peer, cancellation while a decision is pending, retained decisions after restart, repeated stale revisions reaching their cap, invalid parent/cleanup identities, and binary/Unicode rename publication. The directory test exposed a false conflict in Git 2.30's three-way index merge; the fixed runtime applies an exact candidate delta after checking preconditions. Desktop checks now navigate between a stale parent and completed revision, retain the actual Codex report, and restart without command-line arguments.
+Historical retirement integration, desktop, comparison, migration and receipt artifacts remain useful only for the binaries they identify. Do not rerun retirement or an installer to test this source. See [validation report](validation-report.md) and [guarantees](guarantees.md).

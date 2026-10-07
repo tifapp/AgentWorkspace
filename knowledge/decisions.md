@@ -1,17 +1,15 @@
 # Decisions
 
-## D1 — Managed Codex tools and scoped Git, 2026-10-07
+## Windows/Codex operating boundary
 
-Use Codex app-server 0.160.0 with dynamic managed tools. Native shell is disabled and the native working directory is read-only. PowerShell mutations and validation use an AppContainer; private Git uses a sanitized broker adapter. The authenticated reasoning host remains outside the command sandbox. Chosen by the implementation agent within the user's Codex-only delegation.
+Codex CLI 0.160.0 is the supported agent host on Windows x64. Managed PowerShell runs in AppContainer; private Git uses sanitized broker tools. Canonical main/linked/bare Git profiles and pinned local modules are supported; network/SMB needs an actual lock proof. Native SDK work requires an available frozen Hyper-V profile, separate nonadministrator worker and exact VM shutdown receipt. No host fallback is authorized. External GitHub/PostgreSQL/deployment effects require configured destination, scoped review and reconciliation. Unmanaged programs and other accounts are outside mediation.
 
-Evidence: src/AgentOS.Core/ManagedCodexHost.cs@68c92e8+dirty; artifacts/retirement/codex-native-readonly/results.json (real model source edit and Git diff). Recheck after Codex protocol, model configuration, tool exposure or sandbox changes.
+## Historical retirement
 
-## D2 — Retire only after evidence and legacy drain, 2026-10-07
+The resource-checkin retirement archive and receipt document a prior operational cutover. Original host-protected files may remain discoverable; the old release receipts identify old binaries only. Do not rerun retirement or installation, delete old artifacts, or edit global Codex instructions as part of the integrated portable delivery. Preserve the old bundle; build the compatible current CLI side by side.
 
-Archive the installed skill reversibly, replace global instructions and leave an unsupported legacy registry schema. Refuse cutover with other active legacy tasks. Do not imply unsupported external operations became protected. User explicitly requested retirement on 2026-10-07.
+## Current delivery and evidence
 
-Evidence: user request; scripts/retire-resource-checkin.ps1@68c92e8+dirty; artifacts/retirement/retirement-receipt.json and cutover-verification.json. Status: completed operational retirement at 2026-10-07 08:33 UTC. Host permissions denied moving the installed directory; rollback worked, then a preserved archive copy, replacement instructions and unsupported registry schema disabled legacy execution. Original files remain discoverable. Recheck after migration or policy changes.
+Use project schema 3 and machine-journal schema 2 with compatible App/CLI broker. Build output is `artifacts/release/agent-os-integrated-win-x64` and matching ZIP. Exact archived 0d8a7e9 passed 71/71 root-native integration checks; receipt pins archive and DLL hashes. Preview UIA controls/bounds and capture/drafting fixtures prove their stated checks only; blank screenshots do not prove rendering. SDK/adapter fixtures do not prove actual VM or live external effects. Phone remains deferred; other hosts/platforms are excluded.
 
-## Approved platform boundary (2026-10-07)
-
-This program is Windows/Codex only. Phone work is deferred and explicitly excluded: no mobile app, relay, pairing, phone notifications, or phone control is implemented or approved for this release. Future phone work needs a separate decision and acceptance evidence.
+Phone work is deferred and explicitly excluded; no mobile app, relay, pairing, phone notifications or phone control is in this release.

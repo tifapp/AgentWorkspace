@@ -1,14 +1,11 @@
-﻿# Open guarantees
+# Open verification and prerequisites
 
-- Arbitrary native SDK commands, including dotnet test, are not verified managed surfaces. Establish actual tool isolation and output before advertising support.
-- External deployment, user databases, other Windows accounts and unmanaged programs are outside the coordinated surface.
-- The paired benchmark measures a no-op effect plus admission/release. It does not establish model-token savings or whole development-task throughput.
-- Regular AppContainer Windows platform grants remain. This is not a complete operating-system reference monitor.
-- Final retirement status is determined by artifacts/retirement/retirement-receipt.json and installed global instructions, not a design document.
+- Exact archived `0d8a7e9` source passed 71/71 root-native checks. Preserve `artifacts/integration-final-regression/results.json` with `artifacts/integration-native-acceptance-evidence.json`; the results source field inherited parent checkout 9d, so the receipt is the source identity.
+- Obtain nonblank rendered screenshots or another direct visual check. Native App build 73d had zero warnings/errors and preview UIA controls/bounds passed wide/narrow, but current-session and retained 3fbb screenshots are blank.
+- Configure a real Hyper-V host with `vmcompute`, frozen base VHD/profile and separate guest/worker credentials to verify SDK/deployment VM receipt, nonadministrator collector and exact shutdown. Current tests use injected fixtures and this machine lacks `vmcompute`.
+- Exercise a real SMB-backed Git source with an exclusive-lock proof before claiming live network-filesystem behavior. Current conditional SMB path used fixtures only.
+- Configure isolated live GitHub, PostgreSQL and deployment destinations and credentials for real effect/reconciliation proof. Current tests use fixtures; no live remote mutation occurred.
+- Supply trusted Code Signing certificate, SDK packaging tools, prior signed package/metadata and an eligible installation to verify production MSIX install, drain and rollback. Unsigned portable and diagnostic layouts are separate.
+- Arbitrary unmanaged Windows programs, other accounts, phone and non-Codex hosts/platforms are outside the approved boundary. Historical retirement and no-op benchmark receipts do not establish current whole-task performance or broad host protection.
 
-Checked 2026-10-07 at 68c92e8+dirty. Recheck after runtime, host, platform or migration changes.
-
-## Current integration work
-
-The approved Windows/Codex program remains incomplete. The integrated `3fbb628` archive passed the supplied native build and 46/46 test run; this does not close final integration or managed runtime validation. Managed coordinator isolation fix task `9a6daa2207124ad69ad8716a1a04a28a` is underway. Real foreground capture, VM confinement, signed installation, and GitHub/Postgres/deployment effects remain unverified. Phone work is explicitly deferred. See [integration progress](integration-progress.md) for the source identity, fixture limits, journal incident, and recovery.
-
+Structural `scripts/ValidateCompactUi.ps1` and source validation are useful gates, but they do not close these items.

@@ -1,29 +1,16 @@
-# Windows implementation plan
+# Windows implementation plan and current delivery
 
-The starting repository contained only `README.md`. The supplied North Star is the product contract; the macOS rebuild guide is behavioral reference, not evidence that a Windows runtime exists. Codex is the sole supported agent host. This implementation uses .NET 10 LTS and WinUI 3 / Windows App SDK 2.5.1.
+The repository now contains the Windows/Codex implementation: durable project runtime, managed Codex tools, private Git publication, maps and interactions, native desktop capture/review, conditional Git and Hyper-V profiles, scoped external adapters, notifications and signed-update protocol. The source boundary is summarized in [guarantees](guarantees.md). Phone work is deferred; other hosts and platforms are excluded.
 
-1. Build a local runtime with durable state and exclusive ownership per project.
-2. Launch Codex with ordinary tools in independent Git clones. Capture streamed host progress and confirmed completion.
-3. Prepare immutable candidates, coordinate entry into a managed shared Git branch, reject stale changed paths, and validate the combined tree before atomic publication.
-4. Implement an exact-candidate local release decision with durable scope, deduplication, and independent work while pending.
-5. Own normal process trees through Windows Job Objects; retain private output and recover incomplete outcomes truthfully.
-6. Build the WinUI workflow, run real Codex concurrency and desktop automation, test failure and recovery boundaries, and package a self-contained portable app.
+The immediate delivery path is:
 
-The boundary is deliberately limited: the runtime controls its own integration and local release operations. Same-user arbitrary commands, external services, credentials, and network effects do not cross an enforced reference monitor here. No private edit is described as a shared mutation. Publication parking does not imply that Codex supports parking one native tool call while reasoning continues in that same turn.
+1. Preserve the completed root-native 71/71 receipt for exact archived `0d8a7e9bc9ead47b21b3f2495483ee7c0f134613`: `artifacts/integration-final-regression/results.json` and `artifacts/integration-native-acceptance-evidence.json`. The results source field inherited parent checkout 9d; use the receipt for source identity.
+2. Publish side by side with `scripts/build.ps1 -Test -Publish` to `artifacts/release/agent-os-integrated-win-x64` and its matching ZIP. Use its compatible CLI. Preserve the installed retirement bundle and historical receipts.
+3. Validate rendered UI when a capture mechanism produces nonblank screenshots. Current UIA controls/bounds checks do not prove rendering.
+4. Provision a suitable Hyper-V host/profile and production signing material, then separately exercise real SDK VM receipts, live external destinations and signed MSIX update/rollback before claiming those deployments verified.
 
-## Next objective: replace resource-checkin
+The current native App build 73d completed with zero warnings/errors. Owned capture and synthetic authenticated drafting proofs passed their stated fixtures. Injected SDK/adapter tests are narrower than real VM or remote operation evidence. `ValidateCompactUi.ps1` and source validation are structural. No installer, retirement migration, global instruction change or external deployment is part of this delivery.
 
-The project must outperform and supersede the resource-checkin skill so ordinary Codex work no longer requires it. The implemented publication slice is a foundation for this objective. Follow the [replacement acceptance criteria and milestones](product-objective.md): measure the baseline, establish machine-wide ownership, mediate ordinary effects, implement scheduling/recovery, then demonstrate and migrate a complete replacement. Preserve the current guarantee boundary until broader enforcement is proven.
+Implementation anchors: `ProjectRuntime.cs` and `Storage.cs` for state/publication; `TaskMaps.cs` and `InteractiveWork.cs` for graph and inbox; `ForegroundCapture.cs`, `ContextMicroagent.cs` and `ContextArtifacts.cs` for context; `GitProjectProfiles.cs` and `PrivateGit.Modules.cs` for repositories; `ExecutionProfiles.cs` and `HyperVExecution.cs` for SDK/deployment isolation; `ExternalEffectRuntime.cs` for scoped effects; `RuntimeUpdate.cs` and packaging scripts for update protocol.
 
-## Version and API references
-
-- [.NET support policy](https://dotnet.microsoft.com/en-us/platform/support/policy/dotnet-core): .NET 10 is the current LTS.
-- [Windows App SDK release channels](https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/release-channels): stable SDK selection.
-- [Self-contained Windows App SDK deployment](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/self-contained-deploy/deploy-self-contained-apps): portable managed and native dependencies.
-- [Codex non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode): JSON events, workspace-write, CLI authentication and task execution. The installed CLI's `exec --help` was also checked.
-- [Windows Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects): normal child inheritance, lifecycle termination and the WMI limitation.
-- [Git update-ref](https://git-scm.com/docs/git-update-ref): expected-old ref publication.
-
-## Approved platform boundary (2026-10-07)
-
-This program is Windows/Codex only. Phone work is deferred and explicitly excluded: no mobile app, relay, pairing, phone notifications, or phone control is implemented or approved for this release. Future phone work needs a separate decision and acceptance evidence.
+Phone work is deferred and explicitly excluded; no mobile app, relay, pairing, phone notifications or phone control is in this release.

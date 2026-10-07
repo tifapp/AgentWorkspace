@@ -1,73 +1,34 @@
-# agent os for Windows
+# Agent OS for Windows
 
-A native Windows workspace for **Codex**, built with C# / .NET 10 LTS and WinUI 3 (Windows App SDK 2.5.1). Start concurrent Codex tasks, inspect private candidates, validate combined changes, integrate them into a managed Git branch, and make scoped local release decisions.
+Agent OS is a Windows x64 workspace for authenticated Codex CLI 0.160.0. The WinUI app and .NET 10 runtime run concurrent tasks in private Git clones, validate combined candidates, publish to `agent-os/integrated`, and record decisions and recovery evidence. The supported agent host is Codex. Phone features and other platforms or agent hosts are outside this release.
 
-## Product objective
+## Run and build
 
-**Outperform and supersede the resource-checkin skill, making it unnecessary for supported Codex work.** Agents should use ordinary development tools while agent-os automatically handles resource ownership, contention, waiting, revalidation, lifecycle and recovery. Maximize valid autonomous progress with as few interruptions as possible.
+Open a committed Git project in the app, configure a PowerShell validation command that fails on invalid output, then start Codex tasks. Setup reports prerequisites and execution coverage. Uncommitted checkout changes are not task inputs. Completed means a validated candidate was integrated into `agent-os/integrated`, not your checked-out branch.
 
-Supported work now uses automatic effect admission, command isolation and process ownership. Agents maintain no registry entries. The installed skill requirement and execution have been retired through the evidence-gated migration. Host-protected original files remain on disk; see [scope and retirement evidence](docs/retirement.md). Unsupported external operations remain explicit gaps.
-
-## Run
-
-The current portable build is `artifacts/release/agent-os-retirement-win-x64/AgentOS.exe`; the distributable is `artifacts/agent-os-retirement-win-x64.zip`. Extract the entire ZIP before launching. It includes .NET and the Windows App SDK; no development SDK or app registration is required. It is an unsigned local build.
-
-Requirements: Windows x64, build 19041 or later; Git for Windows; installed and authenticated **Codex CLI 0.160.0**. Run `codex login` in your terminal first. The app's Setup page checks prerequisites and shows mediation coverage. Codex is the sole agent host. Your configured model/account are used; live tasks consume normal Codex usage.
-
-1. Open a **local Git project with at least one commit**, or click **Create practice project** in Setup.
-2. Save a PowerShell validation command, such as `& .\Validate.ps1`. It runs in the command sandbox against the complete combined candidate and must fail when checks fail. Arbitrary native SDKs, including `dotnet test`, are not a verified managed surface in this release.
-3. In Workspace, describe a task and select **Start Codex task**. Launch another at any time. Ordinary file, shell, test and local Git work happen in private clones.
-4. Inspect the task map, revision threads, Codex reports, changed paths, diff, transcripts and validation evidence. Completed means validated and integrated into **agent-os/integrated**, not into the currently checked-out branch. Uncommitted source files are not task inputs.
-5. Use **Prepare release decision** for a tested commit. Review its exact scope and evidence, then approve or decline the local release tag. Independent tasks continue while the decision is pending.
-6. Cancel active work to stop its owned processes. After inspecting retained output, clean its private files if desired. Reopen the app to recover saved state.
-
-On a fresh practice project, **Run concurrency check** launches three real Codex tasks, exercises conflicting and independent candidates, asks Codex to revise stale work, and leaves a scoped decision ready for review. This uses real files, Git commits, processes, validation and host sessions.
-
-**Coverage:** managed PowerShell, private Git, shared publication, owned process trees, loopback previews and the shared evidence database. External services and unmanaged programs are not mediated. Read [the enforcement and recovery contract](docs/guarantees.md).
-
-The packaged `cli/AgentOS.Cli.exe` supports doctor, practice, run, status, conflicts, resume-conflict and walkthrough. A `run` launch attaches to an already open project's desktop runtime, retaining its validation policy and evidence. Example: `& .\cli\AgentOS.Cli.exe run 'C:\project' '& .\Validate.ps1' 'Describe the change'`.
-
-## Conflict responses
-
-When publication detects a conflict, the task becomes **Needs response** and retains its private candidate. Task details show the exact cause and paths, base and current shared commits, known holder, candidate commit, response, state, and human escalation. Use **Resume conflict response** in task details, or cli/AgentOS.Cli.exe resume-conflict <project> <work-id>, to continue the same Codex thread. cli/AgentOS.Cli.exe conflicts <project> [work-id] [data-folder] inspects conflict notices and escalations, including while Desktop owns the open project.
-
-The agent must answer the notice with a free form explanation through respond_to_conflict; a final message does not satisfy an owed response. It can coordinate with the holder through a peer message or exact force-interrupt, request publication of reconciled source, explicitly abandon deferred work, or escalate to a human when the cause cannot be reconciled with its task. There is no fixed response menu or automatic choice. A response alone leaves the candidate parked and unpublished until resolution or abandonment is recorded. Unrelated tasks continue normally.
-## Build and verify
+The next portable build is side by side at `artifacts/release/agent-os-integrated-win-x64/AgentOS.exe`; its ZIP is `artifacts/agent-os-integrated-win-x64.zip`. The compatible CLI is `artifacts/release/agent-os-integrated-win-x64/cli/AgentOS.Cli.exe`. Extract the whole ZIP before launch. These are outputs of `scripts/build.ps1 -Publish`, not a claim publication already ran. The earlier `artifacts/release/agent-os-retirement-win-x64` installation and receipts are historical and must not be overwritten. Do not use its schema-1 CLI against current schema-3 project state or schema-2 machine journal.
 
 ```powershell
-# If .NET SDK 10.0.401 is not installed, install it locally in this repo:
 .\scripts\bootstrap.ps1
-
-# Build, run the integration suite, and create the portable ZIP:
 .\scripts\build.ps1 -Test -Publish
-
-# Run only the integration suite (uses real Git and Windows processes; no model calls):
-.\.tools\dotnet\dotnet.exe run --project tests/AgentOS.Tests -- artifacts/tests/manual
-
-# Exercise real Codex concurrency through the same runtime as the app:
-.\.tools\dotnet\dotnet.exe run --project src/AgentOS.Cli -- walkthrough artifacts/live artifacts/live-state
+& .\artifacts\release\agent-os-integrated-win-x64\cli\AgentOS.Cli.exe doctor
+& .\artifacts\release\agent-os-integrated-win-x64\cli\AgentOS.Cli.exe run 'C:\project' '& .\Validate.ps1' 'Describe the task'
 ```
 
-Builds require network access to Microsoft's .NET and NuGet feeds. `global.json` pins the SDK. The app packages both managed and native runtime dependencies. Keep every file from the release folder together. See [testing and validation](docs/testing.md) and [recorded validation](docs/validation-report.md).
+Requirements: Windows x64 build 19041 or newer, Git for Windows, authenticated Codex CLI 0.160.0, and the pinned .NET 10 SDK for building. Run `codex login` in your terminal. Real tasks consume account usage. The `-Test` suite requires a dedicated artifact-root coordinator and runs from compiled `Tests.exe` or `dotnet run`; DLL-only child invocation breaks fixtures. Native acceptance is separate from AppContainer mediated SDK work.
 
-## Source layout
+## Operating workflow
 
-| Component | Purpose |
-| --- | --- |
-| `src/AgentOS.Core` | Durable runtime, Codex stream adapter, Git publication, validation, decisions, Windows process ownership |
-| `src/AgentOS.App` | WinUI setup, task workspace, decision review and evidence interface |
-| `src/AgentOS.Cli` | Prerequisite diagnostics and reproducible runtime workflows |
-| `tests/AgentOS.Tests` | Executable integration suite using real Git repositories and process trees |
-| `scripts` | Build, bootstrap, source hashing and desktop UI automation |
+The app offers task history, exact conflicts and retained candidates, a draggable map canvas with dependencies and citations, capture review, scoped interactions, external-effect review, local notifications, tray navigation and a close guard. Map save and selected ready-task start are separate. The configurable global hotkey captures the retained external foreground HWND before Agent OS takes focus; UIA text and screenshot review are bounded. Screenshot transmission to the isolated drafting microagent requires explicit opt-in and crop review. Its title derives from the foreground window, it returns exactly three suggestions and at most eight generated nodes; users can add more than eight manually. Generation fills a draft and never starts tasks.
 
-The repository began as a README only. This is a new Windows runtime; it does not claim compatibility with the macOS daemon or its schema-14 registry. The supplied North Star, Rebuild Guide, Workflow Edge Cases and Task Map States informed the implementation. See [reference cases and UI mapping](docs/reference-coverage.md) and the [implementation plan](docs/implementation-plan.md).
+Accepted context bytes are hashed and immutable; the runtime injects them into untrusted `additionalContext` only for explicitly started work. Interactions include steering, clarifications, peer handoff and acknowledgement, waits, obligations and followup proposals. Active maps permit partial starts of ready nodes; history retains lineage and debt. CLI and desktop share the owning project runtime through a bounded same-user framed broker. See [desktop controls](docs/desktop-interactions.md) and [guarantees](docs/guarantees.md).
 
-## Current source revision
+Git sources may be main, linked or bare when canonical common/object identity and local pinned modules validate. Network/SMB Git sources require an actual exclusive-lock probe. Native SDK work requires an explicitly configured available Hyper-V profile with a separate nonadministrator worker and exact VM shutdown receipt; there is no host fallback. GitHub, PostgreSQL and deployment adapters require destination-specific configuration, scoped approval and reconciliation. No live external mutation, VM provisioning or signed install is evidenced here.
 
-Draft task-map source, desktop capture, map review, durable interactions, and external-effect review controls have been added since the last compiled release. See [integration status](docs/integration-status.md) for verification limits. Phone work is deferred.
+Production MSIX updates require signing and machine prerequisites. The unsigned portable folder is a diagnostic/local distribution path, not a production signed package. See [signed updates](docs/signed-update.md).
 
-Desktop capture, map review, interaction, and effect controls are described in [desktop interaction controls](docs/desktop-interactions.md).
+## Evidence and boundaries
 
+Current native App build 73d: zero warnings and errors; only TaskMaps ordering and fixture code changed by 0d, leaving UI source unchanged. UI Automation controls and bounds were checked at wide and narrow preview sizes. Screenshots from this session and retained 3fbb baseline are blank, so visual rendering is unverified. Owned external WinForms capture fixture d014 passed HWND/PID identity, text, exact 100 x 80 crop, and hotkey conflict/cleanup. Authenticated synthetic Codex drafting candidate 772 passed a foreground-derived title, three suggestions and three nodes without sending a real user window or screenshot. Final root-native regression on the exact archived `0d8a7e9bc9ead47b21b3f2495483ee7c0f134613` source passed 71/71 through compiled `Tests.exe`; see `artifacts/integration-final-regression/results.json` and `artifacts/integration-native-acceptance-evidence.json`. The results source field inherited parent checkout 9d; the receipt pins the tested archive and DLL hashes. Historical retirement receipts validate earlier binaries only. Structural source checks are not runtime acceptance.
 
-
-Production MSIX signing and cooperative updates require additional machine prerequisites; see [signed update protocol](docs/signed-update.md).
+The resource-checkin retirement archive and receipt are historical; this documentation does not rerun retirement or change global Codex instructions. Supported managed effects do not protect arbitrary unmanaged host programs. See [product objective](docs/product-objective.md), [reference coverage](docs/reference-coverage.md), and [integration status](docs/integration-status.md).

@@ -1,9 +1,9 @@
-﻿# Project knowledge
+# Project knowledge
 
-- [Decisions](decisions.md): Codex-only managed tools, narrow Windows mediation and reversible retirement.
-- [Integration progress](integration-progress.md): 2026-10-07 source verification, journal recovery, native fixture and combined regression findings, and delivery boundaries.
-- [Windows isolation](windows-isolation.md): PowerShell drive navigation, Git null-device incompatibility, process admission and environment failure.
-- [Open guarantees](open.md): native SDKs, external services and broader performance remain unproven.
-- [Compact UI](ui-design.md): task map, preview fixture, transcript, and verification limits.
+- [Decisions](decisions.md): approved Windows/Codex scope, historical retirement and current delivery boundaries.
+- [Integration progress](integration-progress.md): source identity, native evidence and outstanding acceptance.
+- [Open verification](open.md): prerequisites and evidence still needed.
+- [Windows isolation](windows-isolation.md): managed command boundary and historical platform findings.
+- [UI design](ui-design.md): design reference; current controls and verification are in [desktop interactions](../docs/desktop-interactions.md).
 
-Source of truth: implementation and recorded runs, followed by docs/guarantees.md. Artifacts are local evidence and are not committed.
+Current source and executed artifacts are the source of truth. A Git HEAD without a content manifest may not identify uncommitted tested code. Historical receipts identify only their old binaries. Artifacts are local and ignored by Git.
