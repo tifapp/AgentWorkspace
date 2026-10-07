@@ -13,3 +13,8 @@ The resource-checkin retirement archive and receipt document a prior operational
 Use project schema 3 and machine-journal schema 2 with compatible App/CLI broker. Build output is `artifacts/release/agent-os-integrated-win-x64` and matching ZIP. Exact archived 0d8a7e9 passed 71/71 root-native integration checks; receipt pins archive and DLL hashes. Preview UIA controls/bounds and capture/drafting fixtures prove their stated checks only; blank screenshots do not prove rendering. SDK/adapter fixtures do not prove actual VM or live external effects. Phone remains deferred; other hosts/platforms are excluded.
 
 Phone work is deferred and explicitly excluded; no mobile app, relay, pairing, phone notifications or phone control is in this release.
+
+## Capture suggestions (user decision, 2026-10-07)
+
+The user approved automatic generation from checked visible text and explicitly opted-in applied screenshot crop, plus immediate launch only after an explicit Start task click on a suggestion row. Draft editing and draft save/review stay independent. Native root acceptance remains separate from managed SDK surface checks.
+

@@ -29,7 +29,7 @@ public sealed class CaptureDialog : IDisposable
     readonly TextBox cropX = new() { Header = "Crop X", Width = 72 }, cropY = new() { Header = "Y", Width = 72 }, cropW = new() { Header = "Width", Width = 80 }, cropH = new() { Header = "Height", Width = 80 };
     readonly Image preview = new() { MaxHeight = 170, Stretch = Microsoft.UI.Xaml.Media.Stretch.Uniform };
     readonly TextBlock message = new() { TextWrapping = TextWrapping.Wrap };
-    readonly StackPanel suggestions = new() { Orientation = Orientation.Horizontal, Spacing = 5 };
+    readonly StackPanel suggestions = new() { Orientation = Orientation.Vertical, Spacing = 8 };
     readonly StackPanel editor = new() { Spacing = 6 };
     readonly StackPanel taskStrip = new() { Orientation = Orientation.Horizontal, Spacing = 5 };
     readonly Button generate = new() { Content = "Generate suggestions" };
@@ -39,6 +39,15 @@ public sealed class CaptureDialog : IDisposable
     readonly TaskMap draft = new();
     TaskMapCanvas? canvas;
     CancellationTokenSource? generation;
+    readonly CaptureSuggestionFlow flow = new();
+    readonly ShortcutLaunch?[] launches = new ShortcutLaunch?[3];
+    readonly CaptureShortcutRegistry<ShortcutLaunch> launchCache = new();
+    readonly Button[] launchButtons = new Button[3];
+    readonly TextBlock[] suggestionTexts = new TextBlock[3];
+    readonly TextBlock[] rowMessages = new TextBlock[3];
+    string[] displayed = new string[3];
+    string? displayedProject;
+    long displayedContextRevision;
     TaskMap? saved;
     MapTask? editing;
     long revision;
@@ -50,9 +59,13 @@ public sealed class CaptureDialog : IDisposable
     static Button Action(string label, Action call)
     { var b = new Button { Content = label }; b.Click += (_, _) => call(); return b; }
     static TextBlock Note(string text) => new() { Text = text, TextWrapping = TextWrapping.Wrap };
-    void Changed()=>Changed(true);
-    void Changed(bool cancelGeneration) { revision++; if(cancelGeneration)generation?.Cancel(); saved = null; startArmed = false; startButton.Content = "Review and start selected"; startButton.IsEnabled = false; }
-    void Say(string text) { message.Text = text; }
+    void Changed() { revision++; flow.EditDraft(); saved = null; startArmed = false; startButton.Content = "Review and start selected"; startButton.IsEnabled = false; }
+    void ContextChanged()
+    {
+        flow.ChangeContext(); generation?.Cancel();
+        for (var i = 0; i < 3; i++) { launchButtons[i].IsEnabled = false; rowMessages[i].Text = "Context changed"; }
+        _ = flow.DebounceAsync(_ => GenerateAsync(), TimeSpan.FromMilliseconds(600));
+    }    void Say(string text) { message.Text = text; }
 
     void Build()
     {
@@ -68,19 +81,31 @@ public sealed class CaptureDialog : IDisposable
         foreach (var box in new[] { cropX, cropY, cropW, cropH }) crop.Children.Add(box);
         crop.Children.Add(Action("Apply crop", () => _ = ApplyCropAsync()));
         body.Children.Add(crop);
-        body.Children.Add(Note("Inspect this context first. Generating suggestions sends only the checked visible text and screenshot to your configured Codex account. Saving a draft does not start work."));
+        body.Children.Add(Note("Suggestions are submitted automatically to your configured Codex account when this dialog opens and after included context changes. Only checked visible text and an explicitly included applied screenshot crop are sent. Saving a draft does not start work; each Start task button launches its displayed suggestion immediately."));
         var generateRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
         generateRow.Children.Add(generate); generateRow.Children.Add(cancelGeneration);
-        generate.Click += (_, _) => _ = GenerateAsync();
-        cancelGeneration.Click += (_, _) => generation?.Cancel();
+        generate.Click += (_, _) => { flow.CancelPending(); _ = GenerateAsync(); };
+        cancelGeneration.Click += (_, _) => { flow.CancelPending(); generation?.Cancel(); };
         body.Children.Add(generateRow);
         for (int i = 0; i < 3; i++)
         {
-            var button = new Button { Content = "Suggestion " + (i + 1), IsEnabled = false, MaxWidth = 245 };
-            AutomationProperties.SetName(button, "Fill prompt with suggestion " + (i + 1));
-            suggestions.Children.Add(button);
+            var index = i;
+            var row = new StackPanel { Orientation = Orientation.Vertical, Spacing = 3 };
+            var title = Note("Suggestion " + (i + 1) + ": waiting for included context");
+            suggestionTexts[i] = title;
+            var button = new Button { Content = "Start task", IsEnabled = false };
+            AutomationProperties.SetName(button, "Start suggestion " + (i + 1) + " task");
+            button.Click += (_, _) => _ = StartSuggestionAsync(index);
+            launchButtons[i] = button;
+            rowMessages[i] = Note("");
+            var actionRow = new Grid { ColumnSpacing = 8 };
+            actionRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            actionRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            Grid.SetColumn(button, 1);
+            actionRow.Children.Add(title); actionRow.Children.Add(button);
+            row.Children.Add(actionRow); row.Children.Add(rowMessages[i]);
+            suggestions.Children.Add(row);
         }
-        body.Children.Add(suggestions);
         body.Children.Add(mapTitle);
         body.Children.Add(taskStrip);
         body.Children.Add(editor);
@@ -105,11 +130,12 @@ public sealed class CaptureDialog : IDisposable
         draft.Tasks.Add(first);
         editing = first;
         taskTitle.Text = first.Title; prompt.Text = first.Prompt; acceptance.Text = first.Acceptance;
-        editor.Children.Add(taskTitle); editor.Children.Add(prompt); editor.Children.Add(acceptance);
+        editor.Children.Add(taskTitle); editor.Children.Add(prompt); editor.Children.Add(suggestions); editor.Children.Add(acceptance);
         foreach (var box in new[] { project, mapTitle, taskTitle, prompt, acceptance, visible })
-            box.TextChanged += (_, _) => { if(fillingEditor)return;SyncEditing(); Changed(); };
-        includeText.Checked += (_, _) => Changed(); includeText.Unchecked += (_, _) => Changed();
-        includeImage.Checked += (_, _) => { _=SetPreviewAsync(cropped);Changed(); }; includeImage.Unchecked += (_, _) => { _=SetPreviewAsync(null);Changed(); };
+            box.TextChanged += (_, _) => { if(fillingEditor)return;SyncEditing(); Changed(); if (box == visible || box == project) ContextChanged(); };
+        cliPath.TextChanged += (_, _) => ContextChanged();
+        includeText.Checked += (_, _) => { Changed(); ContextChanged(); }; includeText.Unchecked += (_, _) => { Changed(); ContextChanged(); };
+        includeImage.Checked += (_, _) => { _=SetPreviewAsync(cropped);Changed(); ContextChanged(); }; includeImage.Unchecked += (_, _) => { _=SetPreviewAsync(null);Changed(); ContextChanged(); };
         canvas = new TaskMapCanvas(draft);
         canvas.ProjectPath=()=>project.Text.Trim();
         canvas.ResolveTaskResult = id => ProjectClient.InspectAsync(project.Text.Trim(), id);
@@ -117,7 +143,7 @@ public sealed class CaptureDialog : IDisposable
         canvas.MapChanged += Changed;
         body.Children.Add(canvas);
         RebuildTaskStrip();
-        LoadProject(); cliPath.Text = HostDiscovery.FindCodex() ?? "";
+        LoadProject(); cliPath.Text = HostDiscovery.FindCodex() ?? ""; ContextChanged();
     }
     void LoadProject()
     {
@@ -202,7 +228,7 @@ public sealed class CaptureDialog : IDisposable
         {
             var result = capture.Context.CropScreenshot(new CaptureRect(x, y, w, h));
             cropped = result.ScreenshotPng; cropBounds = result.ScreenshotBounds;
-            await SetPreviewAsync(includeImage.IsChecked==true?cropped:null); Changed(); Say("Crop applied locally.");
+            Changed(); ContextChanged(); await SetPreviewAsync(includeImage.IsChecked==true?cropped:null); Say("Crop applied locally.");
         }
         catch (Exception ex) { Say("Crop failed: " + ex.Message); }
     }
@@ -215,47 +241,156 @@ public sealed class CaptureDialog : IDisposable
     }
     async Task GenerateAsync()
     {
-        if (busy) return;
-
-        if (capture.Context == null) { Say("Use the manual task editor when capture is unavailable."); return; }
-        generation?.Dispose(); generation = CancellationTokenSource.CreateLinkedTokenSource(closing);
+        if (disposed) return;
+        generation?.Cancel();
+        generation?.Dispose();
+        generation = CancellationTokenSource.CreateLinkedTokenSource(closing);
         generation.CancelAfter(TimeSpan.FromSeconds(20));
-        var token = generation.Token; var at = revision;
-        busy = true; generate.IsEnabled = false; cancelGeneration.IsEnabled = true;
-        Say("Generating suggestions...");
+        var request = generation;
+        var token = request.Token;
+        var at = flow.ContextRevision;
+        var path = cliPath.Text.Trim();
+        var projectPath = project.Text.Trim();
+        for (var i = 0; i < 3; i++)
+        {
+            launchButtons[i].IsEnabled = false;
+            suggestionTexts[i].Text = "Suggestion " + (i + 1) + ": loading...";
+            if (launches[i] == null) rowMessages[i].Text = "";
+        }
+        generate.IsEnabled = false; cancelGeneration.IsEnabled = true;
+        var outcome = "No suggestions available. Refresh to retry.";
+        var success = false;
         try
         {
-            var cli = cliPath.Text.Trim();
-            if (cli.Length == 0 || !File.Exists(cli)) throw new FileNotFoundException("Choose an installed Codex CLI path. Manual editing remains available.");
+            if (capture.Context == null) { outcome = "No captured context available"; Say(outcome); return; }
             var context = IncludedContext();
-            var proposed = await new CodexContextMicroagent(cli).ProposeAsync(context, at.ToString(), token, includeScreenshot:includeImage.IsChecked==true);
-            if (at != revision || proposed.IsStale(context.Id, at.ToString())) { Say("Context changed; old suggestions were discarded. Generate again."); return; }
-            fillingEditor=true;mapTitle.Text=proposed.Title;draft.Title=proposed.Title;fillingEditor=false;
-            for (int i = 0; i < 3; i++)
+            if (string.IsNullOrWhiteSpace(context.VisibleText) && context.ScreenshotPng == null)
+            { outcome = "No included context"; Say("Include visible text or an applied screenshot crop to generate suggestions."); return; }
+            if (path.Length == 0 || !File.Exists(path)) throw new FileNotFoundException("Choose an installed Codex CLI path.");
+            var proposed = await new CodexContextMicroagent(path).ProposeAsync(context, at.ToString(), token, includeScreenshot:context.ScreenshotPng != null);
+            if (disposed || token.IsCancellationRequested || at != flow.ContextRevision || proposed.IsStale(context.Id, at.ToString())) return;
+            displayedProject = projectPath;
+            displayedContextRevision = at;
+            for (var i = 0; i < 3; i++)
             {
-                var suggestion = proposed.Suggestions[i].Text;
-                var suggestionButton = new Button { Content = suggestion, MaxWidth = 245 };
-                AutomationProperties.SetName(suggestionButton, "Fill prompt with suggestion " + (i + 1));
-                suggestionButton.Click += (_, _) => { prompt.Text = suggestion; Say("Suggestion filled the prompt. Review before saving."); };
-                suggestions.Children.RemoveAt(i); suggestions.Children.Insert(i, suggestionButton);
+                var next = proposed.Suggestions[i].Text;
+                displayed[i] = next;
+                launches[i] = launchCache.Find(at, projectPath, next);
+                suggestionTexts[i].Text = "Suggestion " + (i + 1) + ": " + displayed[i];
+                rowMessages[i].Text = launches[i]?.Started == true ? "Started" : launches[i]?.InFlight == true ? "Saving and starting task..." : launches[i]?.Error ?? "";
+                launchButtons[i].Content = launches[i]?.Started == true ? "Started" : "Start task";
+                launchButtons[i].IsEnabled = !string.IsNullOrWhiteSpace(projectPath) && launches[i]?.Started != true && launches[i]?.InFlight != true;
             }
-            if (proposed.Nodes.Length > 0)
-            {
-                draft.Tasks.Clear(); draft.Edges.Clear();
-                var ids = proposed.Nodes.ToDictionary(x => x.Id, x => Guid.NewGuid().ToString("N"));
-                foreach (var node in proposed.Nodes)
-                    draft.Tasks.Add(new MapTask { Id = ids[node.Id], Title = node.Title, Prompt = node.Description, Acceptance = node.AcceptanceCriteria });
-                foreach (var node in proposed.Nodes)
-                    foreach (var dependency in node.DependsOn) draft.Edges.Add(new MapEdge(ids[dependency], ids[node.Id], MapEdgeKind.Dependency));
-                editing = null; Edit(draft.Tasks[0]);
-            }
-            Changed(cancelGeneration:false); Say("Review the three suggestions and draft tasks. Nothing has started.");
+            success = true;
+            Say("Suggestions ready. Start a task directly or continue editing the draft.");
         }
-        catch (OperationCanceledException) { Say("Suggestion generation canceled. Manual editing is available."); }
-        catch (Exception ex) { Say("Suggestions unavailable: " + ex.Message + " Edit the draft manually or retry."); }
-        finally { busy = false; generate.IsEnabled = true; cancelGeneration.IsEnabled = false; }
+        catch (OperationCanceledException) { outcome = "Canceled. Refresh to retry."; if (ReferenceEquals(generation, request)) Say("Suggestion generation canceled. Refresh to retry."); }
+        catch (Exception ex) { outcome = "Unavailable: " + ex.Message + " Refresh to retry."; if (ReferenceEquals(generation, request)) Say("Suggestions unavailable: " + ex.Message + " Refresh to retry."); }
+        finally
+        {
+            if (ReferenceEquals(generation, request))
+            {
+                generation = null;
+                if (!disposed) { generate.IsEnabled = true; cancelGeneration.IsEnabled = false; }
+                if (!disposed && success)
+                    for (var i = 0; i < 3; i++) if (launches[i] is { } item)
+                    { rowMessages[i].Text = item.Started ? "Started" : item.InFlight ? "Saving and starting task..." : item.Error;
+                      launchButtons[i].Content = item.Started ? "Started" : "Start task"; launchButtons[i].IsEnabled = !item.Started && !item.InFlight; }
+                if (!disposed && !success && at == flow.ContextRevision)
+                    for (var i = 0; i < 3; i++) suggestionTexts[i].Text = "Suggestion " + (i + 1) + ": " + outcome;
+            }
+            request.Dispose();
+        }
+    }    sealed class ShortcutLaunch(TaskMap map, ForegroundContext context, long contextRevision)
+    {
+        public TaskMap Map { get; } = map;
+        public ForegroundContext Context { get; } = context;
+        public long ContextRevision { get; } = contextRevision;
+        public bool ContextStored { get; set; }
+        public bool Started { get; set; }
+        public bool InFlight { get; set; }
+        public string Error { get; set; } = "";
     }
-    static string CaptureSource(ForegroundContext context,string kind,CaptureRect? bounds=null)
+    async Task StartSuggestionAsync(int index)
+    {
+        if (disposed || displayedContextRevision != flow.ContextRevision ||
+            !string.Equals(displayedProject, project.Text.Trim(), StringComparison.Ordinal) ||
+            string.IsNullOrWhiteSpace(displayedProject) || string.IsNullOrWhiteSpace(displayed[index])) return;
+        var launch = launches[index];
+        if (launch?.Started == true || launch?.InFlight == true) return;
+        if (launch == null)
+        {
+            ForegroundContext included;
+            try { included = IncludedContext(); }
+            catch (Exception ex) { rowMessages[index].Text = ex.Message; return; }
+            var context = new ForegroundContext(included.Id, included.CapturedAt, included.Window,
+                included.VisibleText, included.ScreenshotPng?.ToArray(), included.ScreenshotBounds);
+            var map = CaptureShortcutPlan.Create(displayedProject, displayed[index]);
+            launch = launchCache.GetOrAdd(flow.ContextRevision, displayedProject!, displayed[index],
+                () => new ShortcutLaunch(map, context, flow.ContextRevision));
+            launches[index] = launch;
+        }
+        launch.InFlight = true; launch.Error = "";
+        if (CanUpdateRow(index, launch)) { launchButtons[index].IsEnabled = false; rowMessages[index].Text = "Saving and starting task..."; }
+        try
+        {
+            var map = launch.Map;
+            var existing = await FindShortcutMapAsync(map);
+            if (existing == null)
+            {
+                if (!launch.ContextStored)
+                {
+                    map.ContextRefs.Clear();
+                    if (!string.IsNullOrWhiteSpace(launch.Context.VisibleText))
+                        map.ContextRefs.Add(await accept(map.ProjectPath, ContextArtifactKind.Text,
+                            Encoding.UTF8.GetBytes(launch.Context.VisibleText), CaptureSource(launch.Context, "visible text"), launch.Context.CapturedAt, closing));
+                    if (launch.Context.ScreenshotPng is { } png)
+                        map.ContextRefs.Add(await accept(map.ProjectPath, ContextArtifactKind.Png, png,
+                            CaptureSource(launch.Context, "screenshot", launch.Context.ScreenshotBounds), launch.Context.CapturedAt, closing));
+                    launch.ContextStored = true;
+                }
+                try { existing = await save(JsonFormat.Copy(map), closing); }
+                catch { existing = await FindShortcutMapAsync(map); if (existing == null) throw; }
+            }
+            if (existing == null) throw new IOException("The map save was not confirmed.");
+            if (CaptureShortcutPlan.IsStarted(existing, map.Tasks[0].Id))
+            { MarkStarted(index, launch); return; }
+            if (existing.Status != MapStatus.Draft)
+                throw new IOException("The map is active, but the task launch is not confirmed. Retry to check its status.");
+            try { var started = await start(existing, closing); if (started.Count != 1) throw new IOException("The task launch was not confirmed."); }
+            catch
+            {
+                var checkedMap = await FindShortcutMapAsync(map);
+                if (checkedMap != null && CaptureShortcutPlan.IsStarted(checkedMap, map.Tasks[0].Id))
+                { MarkStarted(index, launch); return; }
+                throw;
+            }
+            MarkStarted(index, launch);
+        }
+        catch (Exception ex) { launch.Error = "Start not confirmed: " + ex.Message + " Retry this row."; if (CanUpdateRow(index, launch)) rowMessages[index].Text = launch.Error; }
+        finally
+        {
+            launch.InFlight = false;
+            if (!launch.Started && CanUpdateRow(index, launch)) launchButtons[index].IsEnabled = true;
+        }
+    }
+    async Task<TaskMap?> FindShortcutMapAsync(TaskMap snapshot)
+    {
+        var maps = await ProjectClient.MapsAsync(snapshot.ProjectPath, closing);
+        return CaptureShortcutPlan.Match(snapshot, maps);
+    }
+    bool CanUpdateRow(int index, ShortcutLaunch launch) => !disposed &&
+        displayedContextRevision == flow.ContextRevision &&
+        CaptureShortcutRegistry<ShortcutLaunch>.RowMatches(launch, launches[index], launch.ContextRevision,
+            flow.ContextRevision, launch.Map.ProjectPath, project.Text.Trim(), launch.Map.Tasks[0].Prompt,
+            displayed[index], generation != null);    void MarkStarted(int index, ShortcutLaunch launch)
+    {
+        launch.Started = true;
+        if (!CanUpdateRow(index, launch)) return;
+        launchButtons[index].Content = "Started";
+        launchButtons[index].IsEnabled = false;
+        rowMessages[index].Text = "Started";
+    }    static string CaptureSource(ForegroundContext context,string kind,CaptureRect? bounds=null)
     {
         var area=bounds is {} b?$" bounds=[{b.X},{b.Y},{b.Width},{b.Height}]":"";
         var raw=$"foreground {kind}:{area} pid={context.Window.ProcessId} born={context.Window.ProcessCreated:O} app={context.Window.App} title={context.Window.Title}";
@@ -313,8 +448,21 @@ public sealed class CaptureDialog : IDisposable
             Say(hotkey == HotKeyStatus.Conflict ? "Global shortcut is already in use. Capture via the app button or Ctrl+Shift+M." : "Global shortcut unavailable. Capture via the app button or Ctrl+Shift+M.");
         await dialog.ShowAsync();
     }
-    public void Dispose() { if (disposed) return; disposed = true; generation?.Cancel(); generation?.Dispose(); }
+    public void Dispose() { if (disposed) return; disposed = true; flow.Dispose(); generation?.Cancel(); generation?.Dispose(); }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
