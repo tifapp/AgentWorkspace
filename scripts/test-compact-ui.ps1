@@ -19,18 +19,19 @@ try {
   throw "Missing UIA control: $id"
  }
  function InvokeId([string]$id,[System.Windows.Automation.AutomationElement]$scope=$window){(RequireId $id $scope).GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()}
- function CompletedRowInView {
+ function CompletedRowInView([string]$childId) {
   $list=RequireId 'WorkList'
   $scroll=$list.GetCurrentPattern([System.Windows.Automation.ScrollPattern]::Pattern)
-  if($scroll.Current.VerticallyScrollable){$scroll.SetScrollPercent([System.Windows.Automation.ScrollPattern]::NoScroll,0)}
+  if($scroll.Current.VerticallyScrollable){$scroll.SetScrollPercent([System.Windows.Automation.ScrollPattern]::NoScroll,100)}
   $row=RequireId 'TaskRow_preview-completed' $list
+  $child=RequireId $childId $row
   $clock=[System.Diagnostics.Stopwatch]::StartNew()
-  while($row.Current.IsOffscreen -and $clock.Elapsed.TotalSeconds -lt 5){
+  do {
+   $bounds=$child.Current.BoundingRectangle
+   if($bounds.Width -gt 0 -and $bounds.Height -gt 0){return $row}
    Start-Sleep -Milliseconds 75
-   $row=RequireId 'TaskRow_preview-completed' $list
-  }
-  if($row.Current.IsOffscreen){throw 'Completed sample row did not enter the WorkList viewport.'}
-  return $row
+  } while($clock.Elapsed.TotalSeconds -lt 5)
+  throw "Completed sample control did not lay out: $childId"
  }
  function FindDialogClose([System.Windows.Automation.AutomationElement]$dialog){
   $close=FindId 'CloseButton' $dialog
@@ -65,18 +66,18 @@ try {
  foreach($id in @('WorkList','TaskRow_preview-completed','TaskRow_preview-child','TaskRow_preview-running','TaskRow_preview-waiting','TaskRow_preview-failed','TaskRow_preview-private','TaskRow_preview-stale','TaskRow_preview-unknown','PreviewUpdate','PreviewReset','Settings','TaskPrompt','StartTask')){RequireId $id | Out-Null}
  if((FindId 'NavWorkspace') -or (FindId 'NavDecisions')){throw 'Unexpected navigation sidebar.'}
  if((RequireId 'StartTask').Current.IsEnabled){throw 'Preview task mutation is enabled.'}
- $completed=CompletedRowInView
+ $completed=CompletedRowInView 'CodexReport'
  $expander=RequireId 'CodexReport' $completed
  $expander.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern).Expand()
- $completed=CompletedRowInView
+ $completed=CompletedRowInView 'OpenFollowUp'
  InvokeId 'OpenFollowUp' $completed
- $completed=CompletedRowInView
+ $completed=CompletedRowInView 'FollowUpPrompt'
  $follow=RequireId 'FollowUpPrompt' $completed
  $follow.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('Keep follow-up draft')
  $draft=RequireId 'TaskPrompt';$draft.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('Keep task draft')
  InvokeId 'PreviewUpdate';Start-Sleep -Milliseconds 200
  if((RequireId 'TaskPrompt').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value -ne 'Keep task draft'){throw 'Task draft was lost after update.'}
- $completed=CompletedRowInView
+ $completed=CompletedRowInView 'FollowUpPrompt'
  if((RequireId 'FollowUpPrompt' $completed).GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value -ne 'Keep follow-up draft'){throw 'Follow-up draft was lost.'}
  if((RequireId 'CodexReport' $completed).GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern).Current.ExpandCollapseState -ne [System.Windows.Automation.ExpandCollapseState]::Expanded){throw 'Result expansion was lost.'}
  if((RequireId 'SendFollowUp' $completed).Current.IsEnabled){throw 'Preview follow-up mutation is enabled.'}
@@ -87,7 +88,7 @@ try {
   WaitSettingsDialog $false | Out-Null
  }
  & (Join-Path $PSScriptRoot 'inspect-ui.ps1') -TargetProcessId $owned.Id -Screenshot (Join-Path $Output 'wide.png') -Width 1040 -Height 760 | Out-Null
- $completed=CompletedRowInView
+ $completed=CompletedRowInView 'TaskDetails'
  InvokeId 'TaskDetails' $completed
  & (Join-Path $PSScriptRoot 'inspect-ui.ps1') -TargetProcessId $owned.Id -Screenshot (Join-Path $Output 'narrow.png') -Width 640 -Height 760 | Out-Null
  if(!(FindId 'BackToTasks')){throw 'Detail Back is missing.'}
