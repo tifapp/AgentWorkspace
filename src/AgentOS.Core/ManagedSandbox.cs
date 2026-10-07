@@ -108,6 +108,7 @@ internal sealed class ManagedSandbox : IDisposable
                 ["PATH"] = Environment.GetFolderPath(Environment.SpecialFolder.System) + ";" + Path.GetDirectoryName(Commands.PowerShell) + ";C:\\Program Files\\Git\\cmd",
                 ["TEMP"] = temp, ["TMP"] = temp, ["USERPROFILE"] = temp,
                 ["LOCALAPPDATA"] = temp, ["APPDATA"] = temp, ["HOME"] = temp,
+                ["PSModuleAnalysisCachePath"] = Path.Combine(temp, "ModuleAnalysisCache"),
                 ["GIT_TERMINAL_PROMPT"] = "0", ["GIT_CONFIG_NOSYSTEM"] = "1",
                 ["GIT_CONFIG_GLOBAL"] = "NUL", ["DOTNET_CLI_HOME"] = temp,
                 ["DOTNET_SKIP_FIRST_TIME_EXPERIENCE"] = "1", ["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1"

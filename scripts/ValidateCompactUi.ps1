@@ -18,14 +18,60 @@ function Require([string]$text,[string]$pattern,[string]$label) {
 function Exclude([string]$text,[string]$pattern,[string]$label) {
     if ($text -match $pattern) { throw "Unexpected $label" }
 }
+$cacheRelative = 'Microsoft/Windows/PowerShell/ModuleAnalysisCache'
+$cachePath = Join-Path $repo $cacheRelative
+if (Test-Path -LiteralPath $cachePath -PathType Leaf) { throw "Generated PowerShell module cache is a source input: $cacheRelative" }
+$ignore = Get-Content -LiteralPath (Join-Path $repo '.gitignore') -Raw
+Require $ignore '(?m)^/Microsoft/Windows/PowerShell/ModuleAnalysisCache\r?$' 'exact generated cache ignore rule'
+$sandbox = Get-Content -LiteralPath (Join-Path $repo 'src/AgentOS.Core/ManagedSandbox.cs') -Raw
+Require $sandbox '\["PSModuleAnalysisCachePath"\]\s*=\s*Path\.Combine\(temp,\s*"ModuleAnalysisCache"\)' 'private PowerShell module cache environment'
 Exclude $main 'RequestedTheme\s*=\s*ElementTheme\.Light|ShowPage\(|NavWorkspace|NavDecisions|NavEvidence|NavSetup' 'old theme or page navigation'
 Require $main 'new Windows\.Graphics\.SizeInt32\(1040,760\)' 'default compact size'
 Require $main 'Dictionary<string,\s*TaskRow>' 'stable task row dictionary'
 Require $main 'rows\.TryGetValue' 'row reuse'
 Require $main 'Reconcile\(tree,' 'task reconciliation'
 Require $main 'rows\[work\.Id\]\.Children' 'parent-child nesting'
-Require $main 'Commands\.Start\(value,auto\.IsChecked==true,parentId\)' 'actual child follow-up'
-Require $adapter 'runtime\.StartAsync\(prompt, autoIntegrate, parentId: parentId\)' 'runtime child dispatch'
+# Inspect executable handler bodies. Quoted examples and comments cannot satisfy dispatch checks.
+function Get-CSharpMethodBody([string]$source, [string]$signature, [string]$label) {
+    $code = [regex]::Replace($source, '(?s)/\*.*?\*/|//[^\r\n]*|@"(?:[^"]|"")*"|"(?:\\.|[^"\\])*"|''(?:\\.|[^''\\])*''', '')
+    $match = [regex]::Match($code, $signature + '[^;{}]*?(?:\{|=>)')
+    if (!$match.Success) { throw "Missing $label handler" }
+    if ($match.Value.EndsWith('=>')) {
+        $end = $code.IndexOf(';', $match.Index + $match.Length)
+        if ($end -lt 0) { throw "Unclosed $label expression" }
+        return $code.Substring($match.Index + $match.Length, $end - $match.Index - $match.Length)
+    }
+    $open = $code.IndexOf('{', $match.Index)
+    $depth = 0
+    for ($i = $open; $i -lt $code.Length; $i++) {
+        if ($code[$i] -eq '{') { $depth++ }
+        elseif ($code[$i] -eq '}') {
+            $depth--
+            if ($depth -eq 0) { return $code.Substring($open + 1, $i - $open - 1) }
+        }
+    }
+    throw "Unclosed $label handler"
+}
+$followUp = Get-CSharpMethodBody $main 'SendFollowUp\s*\(\s*string\s+parentId\s*,\s*string\s+value\s*\)' 'follow-up'
+$start = Get-CSharpMethodBody $adapter 'Start\s*\(\s*string\s+prompt\s*,\s*bool\s+autoIntegrate\b' 'runtime start'
+Require $start 'runtime\.StartAsync\s*\(\s*prompt\s*,\s*autoIntegrate\b' 'runtime new task dispatch'
+if ($followUp -match '\bCommands\.(?:SendSteering|ReplyAfterCompletion)\s*\(') {
+    Require $followUp '\bIsActive\b' 'active task branch'
+    Require $followUp '\bCommands\.SendSteering\s*\(\s*parentId\s*,\s*value\s*\)' 'active steering dispatch'
+    Require $followUp '\bCommands\.ReplyAfterCompletion\s*\(\s*parentId\s*,\s*value\s*\)' 'completed reply dispatch'
+    Exclude $followUp '\bCommands\.Start\s*\(\s*value\s*,\s*auto\.IsChecked\s*==\s*true\s*,\s*parentId\s*\)' 'unconditional child task dispatch'
+    $steer = Get-CSharpMethodBody $adapter 'SendSteering\s*\(' 'runtime steering'
+    $reply = Get-CSharpMethodBody $adapter 'ReplyAfterCompletion\s*\(' 'runtime completed reply'
+    Require $steer 'runtime\.SendSteeringAsync\s*\(' 'runtime steering route'
+    Require $reply 'runtime\.ReplyAfterCompletionAsync\s*\(' 'runtime completed reply route'
+    $runtime = Get-Content -LiteralPath (Join-Path $repo 'src/AgentOS.Core/InteractiveWork.cs') -Raw
+    $replyRuntime = Get-CSharpMethodBody $runtime 'ReplyAfterCompletionAsync\s*\(' 'completed reply lineage'
+    Require $replyRuntime 'StartAsync\s*\(\s*text\s*,\s*parentId\s*:\s*workId\b' 'completed reply parent lineage'
+} else {
+    # Current integrated UI still uses the original child task route until its separate UI task lands.
+    Require $followUp '\bCommands\.Start\s*\(\s*value\s*,\s*auto\.IsChecked\s*==\s*true\s*,\s*parentId\s*\)' 'transitional child follow-up'
+    Require $start 'runtime\.StartAsync\s*\(\s*prompt\s*,\s*autoIntegrate\s*,\s*parentId\s*:\s*parentId\s*\)' 'runtime child dispatch'
+}
 foreach ($id in @('TaskPrompt','ProjectPath','ValidationCommand','StartTask','SaveSetup','ApproveDecision','RejectDecision','PendingDecisions','WorkList')) {
     Require $main ('"' + $id + '"') "$id automation ID"
 }

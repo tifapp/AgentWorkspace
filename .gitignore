@@ -4,3 +4,4 @@ artifacts/
 **/obj/
 .vs/
 *.user
+/Microsoft/Windows/PowerShell/ModuleAnalysisCache
