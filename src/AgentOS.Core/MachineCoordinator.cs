@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -9,8 +9,50 @@ namespace AgentOS.Core;
 public sealed class MachineCoordinator
 {
     private readonly string _root;
+    private static readonly Lazy<string> AssemblyIdentity = new(() => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(typeof(MachineCoordinator).Assembly.Location))));
     public static string DefaultRoot => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AgentOS", "coordination");
     public MachineCoordinator(string? root = null) { _root = Path.GetFullPath(root ?? DefaultRoot); Directory.CreateDirectory(_root); }
+    public string Root => _root;
+    public const int Protocol = 2;
+    public IDisposable RegisterRuntime()
+    {
+        using var gate = Lock(CancellationToken.None).GetAwaiter().GetResult();
+        Read();
+        using var process = Process.GetCurrentProcess();
+        var owner = new RuntimeOwner { Id = Guid.NewGuid().ToString("N"), Pid = process.Id, Started = process.StartTime.ToUniversalTime().Ticks,
+            Protocol = Protocol, Assembly = AssemblyIdentity.Value, OpenedAtUtc = DateTimeOffset.UtcNow };
+        var path = Path.Combine(_root, "runtime-" + owner.Id + ".json");
+        SaveOwner(path, owner);
+        return new RuntimeLease(this, path, owner);
+    }
+    private static void SaveOwner(string path, RuntimeOwner owner)
+    {
+        var next = path + ".next";
+        using (var stream = new FileStream(next, FileMode.Create, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
+        { JsonSerializer.Serialize(stream, owner, JsonFormat.Options); stream.Flush(true); }
+        File.Move(next, path, true);
+    }
+    private sealed class RuntimeLease(MachineCoordinator coordinator, string path, RuntimeOwner owner) : IDisposable
+    {
+        private int _disposed;
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+            using var gate = coordinator.Lock(CancellationToken.None).GetAwaiter().GetResult();
+            owner.ClosedAtUtc = DateTimeOffset.UtcNow;
+            SaveOwner(path, owner);
+        }
+    }
+    private sealed class RuntimeOwner
+    {
+        public string Id { get; set; } = "";
+        public int Pid { get; set; }
+        public long Started { get; set; }
+        public int Protocol { get; set; }
+        public string Assembly { get; set; } = "";
+        public DateTimeOffset OpenedAtUtc { get; set; }
+        public DateTimeOffset? ClosedAtUtc { get; set; }
+    }
     public Task<IDisposable> EnterAsync(string resource, string task, Action<string>? feedback, CancellationToken cancel) => EnterAsync(new[] { new ResourceClaim("legacy", resource.ToUpperInvariant(), ResourceAccess.Write) }, task, feedback, cancel);
     public async Task<IDisposable> EnterAsync(IEnumerable<ResourceClaim> resources, string task, Action<string>? feedback, CancellationToken cancel)
     {
@@ -66,33 +108,75 @@ public sealed class MachineCoordinator
             catch (IOException) { await Task.Delay(25, timeout.Token); }
         }
     }
+    private static bool IsAlive(int pid, long started)
+    {
+        try { using var process = Process.GetProcessById(pid); return !process.HasExited && process.StartTime.ToUniversalTime().Ticks == started; }
+        catch (ArgumentException) { return false; }
+        catch (System.ComponentModel.Win32Exception) { return true; }
+    }
+    private IEnumerable<RuntimeOwner> RegisteredOwners()
+    {
+        foreach (var path in Directory.GetFiles(_root, "runtime-*.json"))
+        {
+            var owner = JsonSerializer.Deserialize<RuntimeOwner>(File.ReadAllText(path), JsonFormat.Options)
+                ?? throw new InvalidDataException("Runtime registration is invalid.");
+            if (owner.Pid <= 0 || owner.Started <= 0 || owner.Protocol <= 0 || string.IsNullOrWhiteSpace(owner.Assembly))
+                throw new InvalidDataException("Runtime registration identity is incomplete.");
+            yield return owner;
+        }
+    }
+    public void UpgradeSchema1Offline(bool legacyRuntimeLocksDrained)
+    {
+        if (!legacyRuntimeLocksDrained) throw new InvalidOperationException("Close legacy runtimes and drain all owning project locks before offline upgrade.");
+        using var gate = Lock(CancellationToken.None).GetAwaiter().GetResult();
+        var file = Path.Combine(_root, "journal.json");
+        if (!File.Exists(file)) throw new InvalidOperationException("There is no schema 1 journal to upgrade.");
+        var state = ReadRaw();
+        if (state.Schema == 2) return;
+        if (state.Entries.Any(x => IsAlive(x.Pid, x.Started)))
+            throw new InvalidOperationException("Legacy owner is live. Close old runtimes and drain owning project locks before offline upgrade.");
+        if (RegisteredOwners().Any(x => x.ClosedAtUtc == null && IsAlive(x.Pid, x.Started)))
+            throw new InvalidOperationException("Registered runtime owner is live. Close it before offline upgrade.");
+        var backup = Path.Combine(_root, "journal.schema1.backup.json");
+        var sourceHash = SHA256.HashData(File.ReadAllBytes(file));
+        if (!File.Exists(backup))
+        {
+            var next = backup + ".next";
+            using (var source = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (var copy = new FileStream(next, FileMode.Create, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
+            { source.CopyTo(copy); copy.Flush(true); }
+            if (!sourceHash.SequenceEqual(SHA256.HashData(File.ReadAllBytes(next)))) throw new IOException("Journal migration backup verification failed.");
+            File.Move(next, backup);
+        }
+        else if (!sourceHash.SequenceEqual(SHA256.HashData(File.ReadAllBytes(backup))))
+            throw new InvalidDataException("Existing schema 1 backup differs from the journal.");
+        foreach (var item in state.Entries) item.Claims = [new ResourceClaim("legacy", item.Resource, ResourceAccess.Write)];
+        state.Schema = 2;
+        Write(state);
+    }
     private Journal Read()
+    {
+        var state = ReadRaw();
+        if (state.Schema == 1)
+            throw new InvalidOperationException("Schema 1 requires explicit offline upgrade after all old runtimes and owning project locks are drained. Journal and receipts are unchanged.");
+        var assembly = AssemblyIdentity.Value;
+        if (RegisteredOwners().Any(x => x.ClosedAtUtc == null && IsAlive(x.Pid, x.Started) &&
+            (x.Protocol != Protocol || !string.Equals(x.Assembly, assembly, StringComparison.Ordinal))))
+            throw new InvalidOperationException("An incompatible live runtime owner is registered. Close it before using shared coordination.");
+        return state;
+    }
+    private Journal ReadRaw()
     {
         var file = Path.Combine(_root, "journal.json"); if (!File.Exists(file)) return new();
         var state = JsonSerializer.Deserialize<Journal>(File.ReadAllText(file), JsonFormat.Options) ?? throw new InvalidDataException("The machine coordination journal is empty.");
         if ((state.Schema != 1 && state.Schema != 2) || state.Entries.Select(x => x.Id).Distinct().Count() != state.Entries.Count || state.Entries.Any(x => x.Pid <= 0 || x.Started <= 0 || string.IsNullOrEmpty(x.Resource)))
             throw new InvalidDataException("The machine coordination journal is invalid. Admission is stopped; restore the journal from evidence.");
-        if (state.Schema == 1)
-        {
-            var backup = Path.Combine(_root, "journal.schema1.backup.json");
-            if (!File.Exists(backup))
-            {
-                var next = backup + ".next";
-                using (var source = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read))
-                using (var copy = new FileStream(next, FileMode.Create, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
-                { source.CopyTo(copy); copy.Flush(true); }
-                if (!SHA256.HashData(File.ReadAllBytes(file)).SequenceEqual(SHA256.HashData(File.ReadAllBytes(next)))) throw new IOException("Journal migration backup verification failed.");
-                File.Move(next, backup);
-            }
-            foreach (var item in state.Entries) { item.Claims = [new ResourceClaim("legacy", item.Resource, ResourceAccess.Write)]; item.QueuedAtUtc = DateTimeOffset.UtcNow; }
-            state.Schema = 2;
-        }
-        if (state.Entries.Any(x => x.Claims == null || x.Claims.Count == 0)) throw new InvalidDataException("Admission claims missing.");
+        if (state.Schema == 2 && state.Entries.Any(x => x.Claims == null || x.Claims.Count == 0))
+            throw new InvalidDataException("Admission claims missing.");
         return state;
     }
     private void Write(Journal state)
     {
-        if (state.History.Count > 512) state.History.RemoveRange(0, state.History.Count - 512);
         var temp = Path.Combine(_root, "journal.next");
         using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
         { JsonSerializer.Serialize(stream, state, JsonFormat.Options); stream.Flush(true); }

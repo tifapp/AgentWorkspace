@@ -13,6 +13,8 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _tokens = new();
     private readonly ConcurrentDictionary<string, Task> _jobs = new();
     private readonly IWorkHost _host;
+    internal MachineCoordinator Coordinator { get; }
+    private readonly IDisposable _runtimeRegistration;
     private readonly TaskInteractionStore _interactions;
     private ProjectState _state;
     private bool _disposed;
@@ -23,11 +25,11 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
     public static string DefaultDataRoot => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AgentOS", "projects");
     public static string Coverage => "Codex CLI 0.160.0 is the only supported host. Coordination is automatic. PowerShell edits and validation run in private Windows AppContainers with no network capabilities; native Codex tools are read-only. Private Git status, diff, add, commit and log use a scoped runtime adapter. The runtime rechecks and validates publication into agent-os/integrated, records evidence in its shared SQLite ledger, and owns loopback previews and process trees. Your checked-out branch is separate. External services, deployment, arbitrary native SDKs, network projects, aliases, links and unmanaged programs are not supported mediation surfaces. Unsupported operations do not receive a broader-permission fallback.";
 
-    private ProjectRuntime(StateStore store, FileStream projectLock, ProjectState state, IWorkHost host)
-    { _store = store; _projectLock = projectLock; _state = state; _host = host; _interactions = new TaskInteractionStore(store.Root); if (host is ManagedCodexHost managed) { managed.Interactions = _interactions; managed.Runtime = this; } }
+    private ProjectRuntime(StateStore store, FileStream projectLock, ProjectState state, IWorkHost host, MachineCoordinator coordinator, IDisposable registration)
+    { Coordinator = coordinator; _runtimeRegistration = registration; _store = store; _projectLock = projectLock; _state = state; _host = host; _interactions = new TaskInteractionStore(store.Root); if (host is ManagedCodexHost managed) { managed.Interactions = _interactions; managed.Runtime = this; } }
 
-    public static Task<ProjectRuntime> OpenAsync(string project, string? dataRoot = null) => OpenInternal(project, dataRoot, new ManagedCodexHost());
-    internal static async Task<ProjectRuntime> OpenInternal(string project, string? dataRoot, IWorkHost host)
+    public static Task<ProjectRuntime> OpenAsync(string project, string? dataRoot = null, string? coordinatorRoot = null) => OpenInternal(project, dataRoot, new ManagedCodexHost(), coordinatorRoot);
+    internal static async Task<ProjectRuntime> OpenInternal(string project, string? dataRoot, IWorkHost host, string? coordinatorRoot = null)
     {
         project = SafePaths.Project(project);
         var top = (await Commands.Git(project, "rev-parse", "--show-toplevel")).Checked();
@@ -54,12 +56,20 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
             var saved = store.Read();
             var state = saved ?? new ProjectState { ProjectPath = project, IntegratedCommit = reference.Checked(), CodexPath = HostDiscovery.FindCodex() ?? "" };
             if (!string.Equals(state.ProjectPath, project, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Saved project identity does not match this folder.");
-            var runtime = new ProjectRuntime(store, projectLock, state, host);
-            await runtime.Recover();
-            runtime._interactions.Recover(id => false);
-            ProjectLocations.Remember(project, dataRoot);
-            runtime._broker = new ProjectBroker(runtime);
-            return runtime;
+            var coordinator = new MachineCoordinator(coordinatorRoot);
+            var registration = coordinator.RegisterRuntime();
+            ProjectRuntime runtime;
+            try { runtime = new ProjectRuntime(store, projectLock, state, host, coordinator, registration); }
+            catch { registration.Dispose(); throw; }
+            try
+            {
+                await runtime.Recover();
+                runtime._interactions.Recover(id => false);
+                ProjectLocations.Remember(project, dataRoot);
+                runtime._broker = new ProjectBroker(runtime);
+                return runtime;
+            }
+            catch { await runtime.DisposeAsync(); throw; }
         }
         catch { projectLock.Dispose(); throw; }
     }
@@ -232,7 +242,7 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
         await _publication.WaitAsync(token);
         try
         {
-            using var admission = await new MachineCoordinator().EnterAsync("git:" + SafePaths.Project(_state.ProjectPath) + ":" + IntegratedRef, work.ShortTask,
+            using var admission = await Coordinator.EnterAsync("git:" + SafePaths.Project(_state.ProjectPath) + ":" + IntegratedRef, work.ShortTask,
                 message => Mutate(() => Event(work.Id, "Coordination", message)), token);
             token.ThrowIfCancellationRequested();
             var project = _state.ProjectPath;
@@ -327,7 +337,7 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
         var afterHead = (await Commands.Git(path, "rev-parse", "HEAD^{tree}")).Checked();
         var evidence = new ValidationEvidence { Commit = commit, Tree = tree, AgainstCommit = current, Command = work.ValidationCommand,
             Environment = environment, EnvironmentSha256 = environmentHash, RuntimeSha256 = StateStore.HashFile(typeof(ProjectRuntime).Assembly.Location), LogPath = log, LogSha256 = StateStore.HashFile(log), ExitCode = code, SourceUnchanged = dirty.Length == 0 && afterHead == tree };
-        if (_host is ManagedCodexHost) await new ValidationLedger().RecordAsync(evidence, token);
+        if (_host is ManagedCodexHost) await new ValidationLedger(Coordinator.Root, Coordinator).RecordAsync(evidence, token);
         return evidence;
     }
     private static string FileVersionInfo() => System.Diagnostics.FileVersionInfo.GetVersionInfo(Commands.PowerShell).FileVersion ?? "unknown";
@@ -462,6 +472,6 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
         if (_broker != null) await _broker.DisposeAsync();
         await WaitForIdleAsync();
         foreach (var source in _tokens.Values) source.Dispose();
-        _lifetime.Dispose(); _projectLock.Dispose(); _publication.Dispose();
+        _lifetime.Dispose(); _projectLock.Dispose(); _publication.Dispose(); _runtimeRegistration.Dispose();
     }
 }

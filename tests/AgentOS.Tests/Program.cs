@@ -2,16 +2,25 @@ using AgentOS.Core;
 using System.Diagnostics;
 using System.Text.Json;
 
+static string ArtifactCoordinator(string path)
+{
+    var full = Path.GetFullPath(path);
+    var user = Path.GetFullPath(MachineCoordinator.DefaultRoot).TrimEnd(Path.DirectorySeparatorChar);
+    if (string.Equals(full, user, StringComparison.OrdinalIgnoreCase) ||
+        full.StartsWith(user + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+        throw new InvalidOperationException("Test coordinator cannot use the user coordinator root.");
+    return full;
+}
 // An executable integration suite keeps runtime verification independent of test-runner packages.
 // ScriptHost is internal-only test injection. The shipped application offers only Codex.
 if (args.FirstOrDefault() == "coordination-child")
 {
-    using var ownership = await new MachineCoordinator(args[1]).EnterAsync("shared-fixture", "child", null, CancellationToken.None);
+    using var ownership = await new MachineCoordinator(ArtifactCoordinator(args[1])).EnterAsync("shared-fixture", "child", null, CancellationToken.None);
     await File.WriteAllTextAsync(args[2], "ready"); await Task.Delay(TimeSpan.FromMinutes(10)); return 0;
 }
 if (args.FirstOrDefault() == "coordination-benchmark")
 {
-    var coordinator = new MachineCoordinator(args[1]);
+    var coordinator = new MachineCoordinator(ArtifactCoordinator(args[1]));
     var measurements = new List<double>();
     for (var i = 0; i < 11; i++)
     {
@@ -23,13 +32,20 @@ if (args.FirstOrDefault() == "coordination-benchmark")
 }
 if (args.FirstOrDefault() == "crash-child")
 {
-    await using var child = await ProjectRuntime.OpenInternal(args[1], args[2], new ScriptHost());
+    await using var child = await ProjectRuntime.OpenInternal(args[1], args[2], new ScriptHost(), ArtifactCoordinator(Path.Combine(args[2], "coordination")));
     child.Configure("Write-Output passed");
     await child.StartAsync("Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 600' -PassThru | ForEach-Object { Set-Content child.pid $_.Id }; Set-Content ready.txt ready; Start-Sleep -Seconds 600");
     await child.WaitForIdleAsync(); return 0;
 }
 
 var root = Path.GetFullPath(args.ElementAtOrDefault(0) ?? "artifacts/tests/" + DateTime.Now.ToString("yyyyMMdd-HHmmss"));
+var userCoordinator = Path.GetFullPath(MachineCoordinator.DefaultRoot).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+_ = ArtifactCoordinator(Path.Combine(root, "coordination"));
+if (Path.GetFullPath(Path.Combine(root, "coordination")).TrimEnd(Path.DirectorySeparatorChar).StartsWith(userCoordinator, StringComparison.OrdinalIgnoreCase) ||
+    string.Equals(Path.GetFullPath(Path.Combine(root, "coordination")), Path.GetFullPath(MachineCoordinator.DefaultRoot), StringComparison.OrdinalIgnoreCase) ||
+    Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar).StartsWith(userCoordinator, StringComparison.OrdinalIgnoreCase) ||
+    string.Equals(Path.GetFullPath(root), Path.GetFullPath(MachineCoordinator.DefaultRoot), StringComparison.OrdinalIgnoreCase))
+    throw new InvalidOperationException("Test artifacts cannot use the user coordinator root.");
 Directory.CreateDirectory(root);
 var results = new List<object>();
 var filter = args.ElementAtOrDefault(1);
@@ -46,7 +62,7 @@ static void Assert(bool condition, string message) { if (!condition) throw new E
 static async Task Eventually(Func<bool> condition, int seconds = 30)
 { using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(seconds)); while (!condition()) await Task.Delay(50, timeout.Token); }
 async Task<ProjectRuntime> NewRuntime()
-{ var project = await PracticeProject.CreateAsync(root); return await ProjectRuntime.OpenInternal(project, Path.Combine(root, "state"), new ScriptHost()); }
+{ var project = await PracticeProject.CreateAsync(root); return await ProjectRuntime.OpenInternal(project, Path.Combine(root, "state"), new ScriptHost(), Path.Combine(root, "coordination")); }
 static WorkUnit Work(ProjectRuntime runtime, string id) => runtime.Snapshot.Work.Single(w => w.Id == id);
 async Task TestAsync(string name, Func<Task> check) => await Test(name, check);
 
@@ -286,7 +302,7 @@ await Test("Scoped authority persists, deduplicates, and permits independent wor
     var d2 = await r.RequestReleaseAsync(b); Assert(d2.Id != d.Id && d2.Status == DecisionStatus.Pending, "Authority widened to a new candidate.");
     await r.DecideAsync(d2.Id, false);
     var project = r.Snapshot.ProjectPath; var data = Directory.GetParent(r.DataDirectory)!.FullName;
-    await r.DisposeAsync(); await using var reopened = await ProjectRuntime.OpenInternal(project, data, new ScriptHost());
+    await r.DisposeAsync(); await using var reopened = await ProjectRuntime.OpenInternal(project, data, new ScriptHost(), Path.Combine(root, "coordination"));
     Assert((await reopened.RequestReleaseAsync(a)).Status == DecisionStatus.Completed, "Grant lost on restart.");
     Assert(reopened.Snapshot.Decisions.Single(x => x.Id == d2.Id).Status == DecisionStatus.Rejected, "Rejection lost.");
 });
@@ -319,7 +335,7 @@ await Test("Cancellation kills owned child processes and retains forensic files"
 await Test("Host success without a completion event is unknown", async () =>
 {
     var project = await PracticeProject.CreateAsync(root);
-    await using var r = await ProjectRuntime.OpenInternal(project, Path.Combine(root, "state"), new ScriptHost(false)); r.Configure("Write-Output passed");
+    await using var r = await ProjectRuntime.OpenInternal(project, Path.Combine(root, "state"), new ScriptHost(false), Path.Combine(root, "coordination")); r.Configure("Write-Output passed");
     var id = await r.StartAsync(ChangeRetries); await r.WaitForIdleAsync();
     Assert(Work(r, id).Status == WorkStatus.Unknown && Work(r, id).CandidateCommit == null, "Unconfirmed success was published.");
 });
@@ -327,7 +343,7 @@ await Test("Host success without a completion event is unknown", async () =>
 await Test("Another runtime cannot own the same project", async () =>
 {
     await using var r = await NewRuntime(); bool refused = false;
-    try { await using var other = await ProjectRuntime.OpenAsync(r.Snapshot.ProjectPath, Path.Combine(root, "different-state")); }
+    try { await using var other = await ProjectRuntime.OpenAsync(r.Snapshot.ProjectPath, Path.Combine(root, "different-state"), Path.Combine(root, "coordination")); }
     catch (IOException e) { refused = e.Message.Contains("already open"); }
     Assert(refused, "A second runtime obtained ownership.");
 });
@@ -344,7 +360,7 @@ await Test("Runtime crash kills surviving descendants and recovers as unknown", 
     await Eventually(() => { pidFile = Directory.Exists(data) ? Directory.GetFiles(data, "child.pid", SearchOption.AllDirectories).FirstOrDefault() : null; return pidFile != null && File.ReadAllText(pidFile).Trim().Length > 0; });
     var childPid = int.Parse(File.ReadAllText(pidFile!));
     process.Kill(); await process.WaitForExitAsync(); await Eventually(() => !ProcessExists(childPid));
-    await using var r = await ProjectRuntime.OpenInternal(project, data, new ScriptHost());
+    await using var r = await ProjectRuntime.OpenInternal(project, data, new ScriptHost(), Path.Combine(root, "coordination"));
     Assert(r.Snapshot.Work.Single().Status == WorkStatus.Unknown, "Restart invented a successful result.");
 });
 
@@ -356,7 +372,7 @@ await Test("Lost integration acknowledgement recovers exact result without repla
     Assert(work.Status == WorkStatus.Completed, work.Detail);
     work.PendingCommit = work.IntegratedCommit; work.IntegratedCommit = null; work.Status = WorkStatus.Validating;
     var dir = r.DataDirectory; await r.DisposeAsync(); new StateStore(dir).Save(state);
-    await using var recovered = await ProjectRuntime.OpenInternal(state.ProjectPath, Directory.GetParent(dir)!.FullName, new ScriptHost());
+    await using var recovered = await ProjectRuntime.OpenInternal(state.ProjectPath, Directory.GetParent(dir)!.FullName, new ScriptHost(), Path.Combine(root, "coordination"));
     Assert(Work(recovered, id).Status == WorkStatus.Completed, "Known successful publication was not recovered.");
     Assert((await Commands.Git(state.ProjectPath, "rev-parse", ProjectRuntime.IntegratedRef)).Checked() == state.IntegratedCommit, "Recovery duplicated commit.");
 });
@@ -383,7 +399,7 @@ await Test("Direct same-user bypass is detected as an unsupported boundary", asy
 await Test("Automatic integration revises stale work within bounded task authority", async () =>
 {
     var project = await PracticeProject.CreateAsync(root);
-    await using var r = await ProjectRuntime.OpenInternal(project, Path.Combine(root, "state"), new RevisingHost());
+    await using var r = await ProjectRuntime.OpenInternal(project, Path.Combine(root, "state"), new RevisingHost(), Path.Combine(root, "coordination"));
     r.Configure("Write-Output passed");
     var a = await r.StartAsync("retry"); var b = await r.StartAsync("cancel");
     await r.WaitForIdleAsync();
@@ -420,7 +436,7 @@ await Test("Corrupt durable state is preserved and refused", async () =>
     var r = await NewRuntime(); var project = r.Snapshot.ProjectPath; var dir = r.DataDirectory; await r.DisposeAsync();
     var file = Path.Combine(dir, "state.json"); await File.WriteAllTextAsync(file, "{ broken state");
     var refused = false;
-    try { await using var other = await ProjectRuntime.OpenInternal(project, Directory.GetParent(dir)!.FullName, new ScriptHost()); }
+    try { await using var other = await ProjectRuntime.OpenInternal(project, Directory.GetParent(dir)!.FullName, new ScriptHost(), Path.Combine(root, "coordination")); }
     catch (JsonException) { refused = true; }
     Assert(refused && File.ReadAllText(file) == "{ broken state", "Corrupt evidence was reset.");
 });
@@ -479,7 +495,7 @@ await Test("Reference ST1 AK3 PR12: stop and cleanup preserve a pending decision
     Assert(Work(r, peer).Status == WorkStatus.Canceled && r.Snapshot.Decisions.Single().Status == DecisionStatus.Pending, "Stopping a peer altered release authority.");
     var project = r.Snapshot.ProjectPath; var dataRoot = Path.GetDirectoryName(r.DataDirectory)!;
     await r.DisposeAsync();
-    await using var recovered = await ProjectRuntime.OpenInternal(project, dataRoot, new ScriptHost());
+    await using var recovered = await ProjectRuntime.OpenInternal(project, dataRoot, new ScriptHost(), Path.Combine(root, "coordination"));
     Assert(recovered.Snapshot.Decisions.Single().Status == DecisionStatus.Pending && Work(recovered, id).WorkspaceRemoved, "Pending decision or cleanup was lost on restart.");
     await recovered.DecideAsync(requests[0].Id, true);
     Assert(recovered.Snapshot.Decisions.Single().Status == DecisionStatus.Completed, "Retained evidence could not support the scoped decision after cleanup.");
@@ -489,7 +505,7 @@ await Test("Reference ST3 ST7: repeated stale revisions stop at the bound and re
 {
     var project = await PracticeProject.CreateAsync(root);
     var host = new RepeatedContentionHost(project);
-    await using var r = await ProjectRuntime.OpenInternal(project, Path.Combine(root, "state"), host);
+    await using var r = await ProjectRuntime.OpenInternal(project, Path.Combine(root, "state"), host, Path.Combine(root, "coordination"));
     r.Configure("Write-Output passed");
     await r.StartAsync("Update settings without overwriting newer work"); await r.WaitForIdleAsync();
     var work = r.Snapshot.Work;
@@ -538,7 +554,7 @@ await Test("Existing project broker admits CLI work, preserves policy and dedupl
     catch (InvalidOperationException) { }
     Assert(runtime.Snapshot.ValidationCommand == "Write-Output passed" && runtime.Snapshot.Work.Count == 1, "Authority was broadened to admit a task.");
     var project = runtime.Snapshot.ProjectPath; await runtime.DisposeAsync();
-    await using var reopened = await ProjectRuntime.OpenInternal(project, null, new ScriptHost());
+    await using var reopened = await ProjectRuntime.OpenInternal(project, null, new ScriptHost(), Path.Combine(root, "coordination"));
     var recovered = await ProjectClient.TryStartAsync(project, "Set-Content broker.txt 'real effect'", request, "Write-Output passed");
     Assert(recovered?.Id == first.Id && reopened.Snapshot.Work.Count == 1 && recovered.Status == WorkStatus.Completed, "A persisted launch was replayed after restart.");
 });
@@ -546,12 +562,90 @@ await Test("Existing project broker admits CLI work, preserves policy and dedupl
 await Test("Project discovery retains a custom evidence root across runtime restart", async () =>
 {
     var project = await PracticeProject.CreateAsync(root); string original;
-    await using (var runtime = await ProjectRuntime.OpenInternal(project, Path.Combine(root, "custom-broker-root"), new ScriptHost()))
+    await using (var runtime = await ProjectRuntime.OpenInternal(project, Path.Combine(root, "custom-broker-root"), new ScriptHost(), Path.Combine(root, "coordination")))
     { runtime.Configure("Write-Output passed"); original = runtime.DataDirectory; }
-    await using var reopened = await ProjectRuntime.OpenInternal(project, null, new ScriptHost());
+    await using var reopened = await ProjectRuntime.OpenInternal(project, null, new ScriptHost(), Path.Combine(root, "coordination"));
     Assert(reopened.DataDirectory == original && reopened.Snapshot.ValidationCommand == "Write-Output passed", "Project discovery opened a different history.");
 });
 
+await Test("Schema 1 refuses live owner without changing journal", async () =>
+{
+    var folder = Path.Combine(root, "schema1-live"); Directory.CreateDirectory(folder);
+    using var process = Process.GetCurrentProcess();
+    var original = JsonSerializer.Serialize(new {
+        Schema = 1, Sequence = 1,
+        Entries = new[] { new { Id = "legacy-live", Resource = "shared", Task = "old", Pid = process.Id,
+            Started = process.StartTime.ToUniversalTime().Ticks, Sequence = 1, Running = true } },
+        History = new[] { new { Id = "receipt", Resource = "previous", Outcome = "exact outcome", At = DateTimeOffset.UnixEpoch } }
+    });
+    var journal = Path.Combine(folder, "journal.json"); await File.WriteAllTextAsync(journal, original);
+    var coordinator = new MachineCoordinator(folder);
+    var refused = false;
+    try { coordinator.UpgradeSchema1Offline(legacyRuntimeLocksDrained: true); }
+    catch (InvalidOperationException e) { refused = e.Message.Contains("Legacy owner"); }
+    Assert(refused, "Live owner was upgraded.");
+    refused = false;
+    try { coordinator.Snapshot(); }
+    catch (InvalidOperationException e) { refused = e.Message.Contains("offline upgrade"); }
+    Assert(refused && await File.ReadAllTextAsync(journal) == original, "Schema 1 changed during refusal.");
+    Assert(!File.Exists(Path.Combine(folder, "journal.schema1.backup.json")), "Refusal wrote a backup.");
+    var registeredFolder = Path.Combine(root, "schema1-registered"); Directory.CreateDirectory(registeredFolder);
+    await File.WriteAllTextAsync(Path.Combine(registeredFolder, "journal.json"), JsonSerializer.Serialize(new { Schema = 1, Sequence = 0, Entries = Array.Empty<object>(), History = Array.Empty<object>() }));
+    await File.WriteAllTextAsync(Path.Combine(registeredFolder, "runtime-older.json"), JsonSerializer.Serialize(new {
+        Id = "older", Pid = process.Id, Started = process.StartTime.ToUniversalTime().Ticks,
+        Protocol = 1, Assembly = "old", OpenedAtUtc = DateTimeOffset.UtcNow, ClosedAtUtc = (DateTimeOffset?)null }));
+    refused = false;
+    try { new MachineCoordinator(registeredFolder).UpgradeSchema1Offline(legacyRuntimeLocksDrained: true); }
+    catch (InvalidOperationException e) { refused = e.Message.Contains("Registered runtime owner"); }
+    Assert(refused, "Idle live registered owner was allowed through migration.");
+});
+await Test("Schema 2 rejects an incompatible live runtime registration", async () =>
+{
+    var folder = Path.Combine(root, "schema2-incompatible"); Directory.CreateDirectory(folder);
+    var journal = Path.Combine(folder, "journal.json");
+    var original = JsonSerializer.Serialize(new { Schema = 2, Sequence = 0, Entries = Array.Empty<object>(), History = Array.Empty<object>() });
+    await File.WriteAllTextAsync(journal, original);
+    using var process = Process.GetCurrentProcess();
+    await File.WriteAllTextAsync(Path.Combine(folder, "runtime-old.json"), JsonSerializer.Serialize(new {
+        Id = "old", Pid = process.Id, Started = process.StartTime.ToUniversalTime().Ticks,
+        Protocol = 1, Assembly = "old", OpenedAtUtc = DateTimeOffset.UtcNow, ClosedAtUtc = (DateTimeOffset?)null }));
+    var refused = false;
+    try { new MachineCoordinator(folder).Snapshot(); }
+    catch (InvalidOperationException e) { refused = e.Message.Contains("incompatible live runtime"); }
+    Assert(refused && await File.ReadAllTextAsync(journal) == original, "Incompatible owner was admitted or journal changed.");
+});await Test("Offline upgrade preserves backup, receipts and claim outcomes", async () =>
+{
+    var folder = Path.Combine(root, "schema1-offline"); Directory.CreateDirectory(folder);
+    var original = JsonSerializer.Serialize(new {
+        Schema = 1, Sequence = 4,
+        Entries = new[] { new { Id = "old-claim", Resource = "shared", Task = "old", Pid = int.MaxValue,
+            Started = 1L, Sequence = 4, Running = true } },
+        History = new[] { new { Id = "receipt", Resource = "previous", Outcome = "exact outcome", At = DateTimeOffset.UnixEpoch } }
+    });
+    var journal = Path.Combine(folder, "journal.json"); await File.WriteAllTextAsync(journal, original);
+    var coordinator = new MachineCoordinator(folder);
+    coordinator.UpgradeSchema1Offline(legacyRuntimeLocksDrained: true);
+    Assert(await File.ReadAllTextAsync(Path.Combine(folder, "journal.schema1.backup.json")) == original, "Schema 1 backup changed.");
+    using (await coordinator.EnterAsync("new", "new", null, CancellationToken.None)) { }
+    var upgraded = await File.ReadAllTextAsync(journal);
+    Assert(upgraded.Contains("exact outcome") && upgraded.Contains("Unknown after owner exit") && upgraded.Contains("Operation ownership released"), "Claims or receipts lost.");
+});
+await Test("Fixture runtime coordinator stays under artifacts", async () =>
+{
+    var runtime = await NewRuntime();
+    var folder = Path.GetFullPath(Path.Combine(root, "coordination"));
+    Assert(runtime.Coordinator.Root == folder && folder != Path.GetFullPath(MachineCoordinator.DefaultRoot), "Fixture used the user coordinator.");
+    var owner = Directory.GetFiles(folder, "runtime-*.json").Single(path => {
+        using var json = JsonDocument.Parse(File.ReadAllText(path));
+        return json.RootElement.GetProperty("Pid").GetInt32() == Environment.ProcessId &&
+            json.RootElement.GetProperty("ClosedAtUtc").ValueKind == JsonValueKind.Null;
+    });
+    using var opened = JsonDocument.Parse(File.ReadAllText(owner));
+    Assert(opened.RootElement.GetProperty("Protocol").GetInt32() == MachineCoordinator.Protocol, "Runtime protocol was not registered.");
+    await runtime.DisposeAsync();
+    using var closed = JsonDocument.Parse(File.ReadAllText(owner));
+    Assert(closed.RootElement.GetProperty("ClosedAtUtc").ValueKind == JsonValueKind.String, "Runtime owner closure was not persisted.");
+});
 await Test("Machine coordination waits fairly, admits independent work and cancels waits", async () =>
 {
     var coordinator = new MachineCoordinator(Path.Combine(root, "machine"));

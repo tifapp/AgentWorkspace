@@ -10,7 +10,7 @@ internal static class FeatureIntegrationChecks
     public static async Task RunAsync(string root)
     {
         var project = await PracticeProject.CreateAsync(root);
-        await using var runtime = await ProjectRuntime.OpenInternal(project, Path.Combine(root, "feature-state"), new ScriptHost());
+        await using var runtime = await ProjectRuntime.OpenInternal(project, Path.Combine(root, "feature-state"), new ScriptHost(), Path.Combine(root, "coordination"));
         runtime.Configure("Write-Output passed");
         var node = new MapTask { Title = "Logical task", Prompt = "Write-Output work", Acceptance = "Done", Selected = true };
         var mapId = runtime.SaveDraftMap(new AgentOS.Core.TaskMap { Title = "Attempts", Tasks = [node] });

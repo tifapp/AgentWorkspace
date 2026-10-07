@@ -112,7 +112,7 @@ internal sealed class ManagedCodexHost : IWorkHost
                 }
                 else if (name == "agent_os_preview")
                 {
-                    using var ownership = await new MachineCoordinator().EnterAsync("private:" + work.Workspace, work.ShortTask, output, cancel);
+                    using var ownership = await (Runtime?.Coordinator ?? throw new InvalidOperationException("Managed host requires its runtime coordinator.")).EnterAsync("private:" + work.Workspace, work.ShortTask, output, cancel);
                     if (preview != null) await preview.DisposeAsync();
                     preview = new OwnedPreview(work.Workspace, p.GetProperty("arguments").GetProperty("preferredPort").GetInt32());
                     result = "A fixed private source snapshot is available at http://127.0.0.1:" + preview.Port + "/ . It closes when this Codex work unit finishes or is canceled."; success = true; output(result);
@@ -129,7 +129,7 @@ internal sealed class ManagedCodexHost : IWorkHost
                         "log" => ["log", "-10", "--oneline"],
                         _ => throw new UnauthorizedAccessException("This Git operation is not delegated.")
                     };
-                    using var ownership = await new MachineCoordinator().EnterAsync("private:" + work.Workspace, work.ShortTask, output, cancel);
+                    using var ownership = await (Runtime?.Coordinator ?? throw new InvalidOperationException("Managed host requires its runtime coordinator.")).EnterAsync("private:" + work.Workspace, work.ShortTask, output, cancel);
                     PrivateGit.Prepare(work.Workspace);
                     var command = await Commands.Git(work.Workspace, args);
                     result = "Exit code: " + command.ExitCode + "\n" + command.Output + command.Error; success = command.ExitCode == 0;
@@ -139,7 +139,7 @@ internal sealed class ManagedCodexHost : IWorkHost
                 {
                 if (name != "agent_os_shell") throw new UnauthorizedAccessException("Unsupported tool.");
                 var script = p.GetProperty("arguments").GetProperty("script").GetString() ?? "";
-                using var ownership = await new MachineCoordinator().EnterAsync("private:" + work.Workspace, work.ShortTask, output, cancel);
+                using var ownership = await (Runtime?.Coordinator ?? throw new InvalidOperationException("Managed host requires its runtime coordinator.")).EnterAsync("private:" + work.Workspace, work.ShortTask, output, cancel);
                 output("Running a command in the private workspace.");
                 using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancel); limit.CancelAfter(TimeSpan.FromMinutes(2));
                 var command = await sandbox.RunAsync(script, Path.Combine(home, "command-" + Guid.NewGuid().ToString("N") + ".log"), output, limit.Token);

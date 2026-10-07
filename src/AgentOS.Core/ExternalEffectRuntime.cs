@@ -115,7 +115,7 @@ public sealed partial class ProjectRuntime
  {
   var(intent,adapter)=await Checked(id,transport,connection,executor,ct);
   if(intent.State is ExternalEffectState.Unknown or ExternalEffectState.InFlight)throw new InvalidOperationException("Unknown outcome requires reconciliation; no replay.");
-  using var ownership=await new MachineCoordinator().EnterAsync("external:"+_state.ProjectPath+":"+intent.Scope.Destination,"external effect",null,ct);
+  using var ownership=await Coordinator.EnterAsync("external:"+_state.ProjectPath+":"+intent.Scope.Destination,"external effect",null,ct);
   (_,adapter)=await Checked(id,transport,connection,executor,ct);
   return await adapter.ExecuteAsync(id,ct);
  },ct);

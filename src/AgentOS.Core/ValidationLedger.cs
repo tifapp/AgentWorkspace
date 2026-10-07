@@ -10,8 +10,8 @@ public sealed class ValidationLedger
 {
     private readonly string _file;
     private readonly MachineCoordinator _coordinator;
-    public ValidationLedger(string? root = null)
-    { var folder = Path.GetFullPath(root ?? MachineCoordinator.DefaultRoot); Directory.CreateDirectory(folder); _file = Path.Combine(folder, "validation.sqlite"); _coordinator = new(folder); }
+    public ValidationLedger(string? root = null, MachineCoordinator? coordinator = null)
+    { var folder = Path.GetFullPath(root ?? MachineCoordinator.DefaultRoot); Directory.CreateDirectory(folder); _file = Path.Combine(folder, "validation.sqlite"); if (coordinator != null && !string.Equals(folder, coordinator.Root, StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("Ledger and coordinator roots differ."); _coordinator = coordinator ?? new(folder); }
     public async Task<string> RecordAsync(ValidationEvidence evidence, CancellationToken cancel = default)
     {
         var bytes = JsonSerializer.SerializeToUtf8Bytes(evidence, JsonFormat.Options);
