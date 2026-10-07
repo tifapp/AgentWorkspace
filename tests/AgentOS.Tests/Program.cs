@@ -60,12 +60,59 @@ await Test("Task maps remain drafts until selected dependencies are ready", asyn
     var id = r.SaveDraftMap(map);
     Assert(r.Snapshot.Work.Count == 0 && r.Snapshot.Maps.Single().Status == MapStatus.Draft, "Saving a draft started execution.");
     var launched = await r.StartSelectedMapTasksAsync(id); await r.WaitForIdleAsync();
-    Assert(launched.Count == 1 && r.Snapshot.Maps.Single().Tasks[1].WorkId == null, "Dependency was bypassed.");
-    var next = await r.StartSelectedMapTasksAsync(id); await r.WaitForIdleAsync();
-    Assert(next.Count == 1 && next[0] != launched[0], "Completed dependency did not unlock the next task.");
+    Assert(launched.Count == 1 && r.Snapshot.Maps.Single().Tasks[1].WorkId != null, "Selected dependency did not launch automatically.");
+    var next = r.Snapshot.Maps.Single().Tasks[1].WorkId!;
+    Assert(next != launched[0] && r.Snapshot.Work.Count == 2, "Dependent task was not launched exactly once.");
+    Assert(r.Snapshot.Work.Single(w => w.Id == next).Task.Contains(second.Acceptance), "Acceptance criteria were absent from the work prompt.");
     var revised = r.Snapshot.Maps.Single(); revised.Edges.Add(new MapEdge(second.Id, first.Id, MapEdgeKind.Dependency));
     var refused = false; try { TaskMapRules.Validate(revised); } catch (ArgumentException) { refused = true; }
     Assert(refused, "A dependency cycle was accepted.");
+});
+await Test("Manual maps exceed eight nodes and unselected nodes keep maps open", async () =>
+{
+    await using var r = await NewRuntime(); r.Configure("Write-Output passed");
+    var tasks = Enumerable.Range(0, 9).Select(i => new MapTask { Title = "Task " + i, Prompt = "Write-Output task" + i, Acceptance = "Evidence " + i, Selected = i == 0 }).ToList();
+    var map = new AgentOS.Core.TaskMap { Title = "Manual map", Tasks = tasks };
+    var id = r.SaveDraftMap(map);
+    var launched = await r.StartSelectedMapTasksAsync(id); await r.WaitForIdleAsync();
+    Assert(launched.Count == 1 && r.Snapshot.Maps.Single().Status == MapStatus.Active, "Unselected work incorrectly completed the map.");
+    Assert(r.Snapshot.Maps.Single().Tasks.Count == 9, "Manual map was capped at eight nodes.");
+});
+await Test("Map revision success retains stale parent and successful child identities", async () =>
+{
+    await using var r = await NewRuntime();
+    var node = new MapTask { Title = "Revise", Prompt = "Write-Output revise", Acceptance = "Done", Selected = true };
+    r.SaveDraftMap(new AgentOS.Core.TaskMap { Title = "Revision map", Tasks = [node] });
+    var state = (ProjectState)typeof(ProjectRuntime).GetField("_state", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(r)!;
+    var parent = new WorkUnit { ExternalRequestId = node.Id, Status = WorkStatus.Stale };
+    var child = new WorkUnit { ParentId = parent.Id, Status = WorkStatus.Completed };
+    state.Work.Add(parent); state.Work.Add(child);
+    typeof(ProjectRuntime).GetMethod("UpdateMapStatuses", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.Invoke(r, null);
+    var mapped = state.Maps.Single().Tasks.Single();
+    Assert(mapped.Status == MapTaskStatus.Completed && mapped.WorkIds.SequenceEqual([parent.Id, child.Id]), "A stale parent masked a completed revision or lost attempt identities.");
+});
+await Test("Canceling one map attempt stops selected dependents", async () =>
+{
+    await using var r = await NewRuntime(); r.Configure("Write-Output passed");
+    var first = new MapTask { Title = "Long task", Prompt = "Start-Sleep -Seconds 20; Write-Output finished", Acceptance = "Finished", Selected = true };
+    var next = new MapTask { Title = "Dependent", Prompt = "Write-Output dependent", Acceptance = "Finished", Selected = true };
+    var id = r.SaveDraftMap(new AgentOS.Core.TaskMap { Title = "Cancelable map", Tasks = [first, next], Edges = [new MapEdge(first.Id, next.Id, MapEdgeKind.Dependency)] });
+    var started = await r.StartSelectedMapTasksAsync(id);
+    r.Cancel(started.Single()); await r.WaitForIdleAsync();
+    var saved = r.Snapshot.Maps.Single();
+    Assert(saved.Status == MapStatus.Canceled && saved.Tasks[1].WorkId == null && r.Snapshot.Work.Count == 1, "Canceled graph launched dependent work.");
+});
+await Test("Context draft rejects unrelated titles and dependency cycles", () =>
+{
+    var window = new ForegroundIdentity(0, 1, DateTimeOffset.UtcNow, "Browser", "Invoice review");
+    var context = new ForegroundContext(Guid.NewGuid(), DateTimeOffset.UtcNow, window, "Invoice total", null, null);
+    var parse = typeof(CodexContextMicroagent).GetMethod("Parse", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+    string Json(string title, string dependencies) => "{\"title\":\"" + title + "\",\"suggestions\":[{\"id\":\"a\",\"text\":\"one\"},{\"id\":\"b\",\"text\":\"two\"},{\"id\":\"c\",\"text\":\"three\"}],\"nodes\":[{\"id\":\"one\",\"title\":\"Check\",\"description\":\"Review\",\"acceptanceCriteria\":\"Checked\",\"dependsOn\":" + dependencies + "}]}";
+    bool Rejected(string json) { try { parse.Invoke(null, [json, context, "rev"]); return false; } catch (System.Reflection.TargetInvocationException e) when (e.InnerException is FormatException) { return true; } }
+    Assert(Rejected(Json("Unrelated topic", "[]")), "Unrelated source title was accepted.");
+    Assert(Rejected(Json("Invoice review", "[\"one\"]")), "Dependency cycle was accepted.");
+    Assert(parse.Invoke(null, [Json("Invoice review", "[]"), context, "rev"]) is ContextDraft, "Valid structured draft was rejected.");
+    return Task.CompletedTask;
 });
 await Test("Old state keeps history and captured citations cannot be rewritten", async () =>
 {

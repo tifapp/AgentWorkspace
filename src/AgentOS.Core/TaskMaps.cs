@@ -2,7 +2,7 @@ using System.Security.Cryptography;
 namespace AgentOS.Core;
 public enum MapStatus { Draft, Active, Completed, Canceled }
 public enum MapEdgeKind { Dependency, Related, Followup }
-public enum MapTaskStatus { Draft, Ready, Running, Completed, Failed, Canceled }
+public enum MapTaskStatus { Draft, Ready, Running, Completed, Failed, Canceled, Private, Waiting, Stale, Unknown, Validating }
 public sealed class TaskMap
 {
  public string Id { get; set; } = Guid.NewGuid().ToString("N");
@@ -23,6 +23,7 @@ public sealed class MapTask
  public string Acceptance { get; set; } = "";
  public MapTaskStatus Status { get; set; } = MapTaskStatus.Draft;
  public string? WorkId { get; set; }
+ public List<string> WorkIds { get; set; } = [];
  public bool Selected { get; set; }
 }
 public sealed record MapEdge(string FromTaskId, string ToTaskId, MapEdgeKind Kind);
@@ -35,7 +36,7 @@ public static class TaskMapRules
  public static void Validate(TaskMap map)
  {
   if (!Guid.TryParseExact(map.Id, "N", out _) || string.IsNullOrWhiteSpace(map.Title)) throw new ArgumentException("A map needs an identity and title.");
-  if (map.Tasks == null || map.Edges == null || map.Citations == null || map.Tasks.Count is < 1 or > 8) throw new ArgumentException("A map needs one to eight tasks and valid collections.");
+  if (map.Tasks == null || map.Edges == null || map.Citations == null || map.Tasks.Count < 1) throw new ArgumentException("A map needs tasks and valid collections.");
   if (map.Tasks.Any(t => t == null || !Guid.TryParseExact(t.Id, "N", out _) || string.IsNullOrWhiteSpace(t.Title) || string.IsNullOrWhiteSpace(t.Prompt) || string.IsNullOrWhiteSpace(t.Acceptance))) throw new ArgumentException("Every task needs an identity, title, prompt and acceptance criteria.");
   var ids = map.Tasks.Select(t => t.Id).ToHashSet(StringComparer.Ordinal);
   if (ids.Count != map.Tasks.Count || map.Edges.Any(e => e == null || !Enum.IsDefined(e.Kind) || !ids.Contains(e.FromTaskId) || !ids.Contains(e.ToTaskId) || e.FromTaskId == e.ToTaskId) || map.Edges.Distinct().Count() != map.Edges.Count) throw new ArgumentException("Map edges must uniquely join distinct tasks in this map.");
@@ -65,7 +66,7 @@ public sealed partial class ProjectRuntime
    if (existing != null && (existing.Status != MapStatus.Draft || existing.Revision != expectedRevision)) throw new InvalidOperationException("The draft changed or is active. Reload it before editing.");
    if (existing == null && expectedRevision != null) throw new InvalidOperationException("The draft no longer exists.");
    var map = JsonFormat.Copy(input); map.ProjectPath = _state.ProjectPath; map.Status = MapStatus.Draft;
-   foreach (var task in map.Tasks) { task.WorkId = null; task.Status = MapTaskStatus.Draft; }
+   foreach (var task in map.Tasks) { task.WorkId = null; task.WorkIds = []; task.Status = MapTaskStatus.Draft; }
    map.Revision = (existing?.Revision ?? 0) + 1;
    if (existing != null)
    {
@@ -77,28 +78,45 @@ public sealed partial class ProjectRuntime
   }
   Changed?.Invoke(); return id;
  }
- public async Task<IReadOnlyList<string>> StartSelectedMapTasksAsync(string mapId)
+ public Task<IReadOnlyList<string>> StartSelectedMapTasksAsync(string mapId)
  {
-  List<(string TaskId, string Prompt)> ready;
+  ObjectDisposedException.ThrowIf(_disposed, this);
+  List<string> launched;
   lock (_sync)
   {
    var map = _state.Maps.Single(m => m.Id == mapId); TaskMapRules.Validate(map);
    if (map.Status is MapStatus.Canceled or MapStatus.Completed) throw new InvalidOperationException("The map is closed.");
-   ready = map.Tasks.Where(t => t.Selected && t.WorkId == null && TaskMapRules.DependenciesComplete(map, t)).Select(t => (t.Id, t.Prompt)).ToList();
-   if (ready.Count == 0) throw new InvalidOperationException("Select a ready task; dependencies must finish first.");
+   if (string.IsNullOrWhiteSpace(_state.ValidationCommand)) throw new InvalidOperationException("Save a validation command in Project setup first.");
+   UpdateMapStatuses();
+   if (!map.Tasks.Any(t => t.Selected && t.WorkId == null && TaskMapRules.DependenciesComplete(map, t)))
+    throw new InvalidOperationException("Select a ready task; dependencies must finish first.");
+   map.Status = MapStatus.Active;
+   launched = LaunchReadyMapTasks(map);
+   Save();
   }
+  Changed?.Invoke(); return Task.FromResult<IReadOnlyList<string>>(launched);
+ }
+ private static string MapPrompt(MapTask task) => task.Prompt.Trim() + "\n\n# Acceptance criteria for this task:\n# " + task.Acceptance.Trim().Replace("\n", "\n# ") + "\n# Report evidence that each criterion is met.";
+ private List<string> LaunchReadyMapTasks(TaskMap map)
+ {
   var launched = new List<string>();
-  foreach (var (taskId, prompt) in ready)
+  if (_disposed || map.Status != MapStatus.Active) return launched;
+  foreach (var task in map.Tasks.Where(t => t.Selected && t.WorkId == null && TaskMapRules.DependenciesComplete(map, t)).ToArray())
   {
-   var id = await StartAsync(prompt, externalRequestId: taskId);
-   lock (_sync)
-   {
-    var map = _state.Maps.Single(m => m.Id == mapId); var task = map.Tasks.Single(t => t.Id == taskId);
-    task.WorkId = id; task.Status = MapTaskStatus.Running; map.Status = MapStatus.Active; map.Revision++; UpdateMapStatuses(); Save();
-   }
-   launched.Add(id);
+   // StartAsync persists the stable request ID before execution. Holding _sync also reserves the map node.
+   var id = StartAsync(MapPrompt(task), externalRequestId: task.Id).GetAwaiter().GetResult();
+   task.WorkId = id; if (!task.WorkIds.Contains(id)) task.WorkIds.Add(id);
+   task.Status = MapTaskStatus.Running; map.Revision++; launched.Add(id);
   }
-  Changed?.Invoke(); return launched;
+  return launched;
+ }
+ private void ScheduleSelectedMapTasks()
+ {
+  lock (_sync)
+  {
+   foreach (var map in _state.Maps.Where(m => m.Status == MapStatus.Active)) LaunchReadyMapTasks(map);
+   Save();
+  }
  }
  private void UpdateMapStatuses()
  {
@@ -106,22 +124,38 @@ public sealed partial class ProjectRuntime
   {
    foreach (var task in map.Tasks)
    {
-    if (task.WorkId == null) task.WorkId = _state.Work.SingleOrDefault(w => w.ExternalRequestId == task.Id)?.Id;
-   }
-   foreach (var task in map.Tasks.Where(t => t.WorkId != null))
-   {
-    var work = _state.Work.SingleOrDefault(w => w.Id == task.WorkId);
-    task.Status = work?.Status switch
+    task.WorkIds ??= [];
+    var root = _state.Work.FirstOrDefault(w => w.ExternalRequestId == task.Id);
+    if (root != null && !task.WorkIds.Contains(root.Id)) task.WorkIds.Insert(0, root.Id);
+    if (task.WorkId == null && root != null) task.WorkId = root.Id;
+    if (task.WorkId == null) continue;
+    var known = task.WorkIds.ToHashSet(StringComparer.Ordinal); known.Add(task.WorkId);
+    bool changed;
+    do
+    {
+     changed = false;
+     foreach (var child in _state.Work.Where(w => w.ParentId != null && known.Contains(w.ParentId)))
+      if (known.Add(child.Id)) changed = true;
+    } while (changed);
+    task.WorkIds = _state.Work.Where(w => known.Contains(w.Id)).Select(w => w.Id).ToList();
+    var attempts = _state.Work.Where(w => known.Contains(w.Id)).ToArray();
+    var successful = attempts.LastOrDefault(w => w.Status == WorkStatus.Completed);
+    var latest = successful ?? attempts.LastOrDefault();
+    task.Status = latest?.Status switch
     {
      WorkStatus.Completed => MapTaskStatus.Completed,
+     WorkStatus.Private => MapTaskStatus.Private,
+     WorkStatus.Waiting => MapTaskStatus.Waiting,
+     WorkStatus.Validating => MapTaskStatus.Validating,
+     WorkStatus.Stale => MapTaskStatus.Stale,
+     WorkStatus.Unknown => MapTaskStatus.Unknown,
+     WorkStatus.Failed => MapTaskStatus.Failed,
      WorkStatus.Canceled => MapTaskStatus.Canceled,
-     WorkStatus.Failed or WorkStatus.Stale or WorkStatus.Unknown => MapTaskStatus.Failed,
      _ => MapTaskStatus.Running
     };
    }
-   foreach (var task in map.Tasks.Where(t => t.WorkId == null)) task.Status = TaskMapRules.DependenciesComplete(map, task) ? MapTaskStatus.Ready : MapTaskStatus.Draft;
-   if (map.Tasks.Count > 0 && map.Tasks.All(t => t.Status == MapTaskStatus.Completed)) map.Status = MapStatus.Completed;
+   foreach (var task in map.Tasks.Where(t => t.WorkId == null)) task.Status = map.Status == MapStatus.Canceled ? MapTaskStatus.Canceled : TaskMapRules.DependenciesComplete(map, task) ? MapTaskStatus.Ready : MapTaskStatus.Draft;
+   if (map.Status == MapStatus.Active && map.Tasks.All(t => t.Selected && t.Status == MapTaskStatus.Completed)) map.Status = MapStatus.Completed;
   }
  }
 }
-

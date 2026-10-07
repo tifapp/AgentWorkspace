@@ -70,12 +70,19 @@ public static class ProjectClient
     public static async Task<IReadOnlyList<TaskMap>?> MapsAsync(string project, CancellationToken cancel = default) => (await Call(project, new("map-list", null, null, null, null), cancel))?.Maps;
     public static async Task<TaskMap?> SaveMapAsync(string project, TaskMap map, long? revision, CancellationToken cancel = default) => (await Call(project, new("map-save", null, null, null, null, map, revision), cancel))?.Maps?.Single();
     public static async Task<IReadOnlyList<string>?> StartMapAsync(string project, string id, CancellationToken cancel = default) => (await Call(project, new("map-start", null, null, id, null), cancel))?.Started;
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    private static extern bool WaitNamedPipe(string name, int timeout);
     private static async Task<BrokerResponse?> Call(string project, BrokerRequest request, CancellationToken cancel)
     {
         project = SafePaths.Project((await Commands.Git(SafePaths.Project(project), "rev-parse", "--show-toplevel")).Checked());
         using var pipe = new NamedPipeClientStream(".", ProjectBroker.Name(project), PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
-        try { await pipe.ConnectAsync(750, cancel); }
-        catch (TimeoutException) { return null; }
+        try { await pipe.ConnectAsync(3500, cancel); }
+        catch (TimeoutException)
+        {
+            var name = @"\\.\pipe\" + ProjectBroker.Name(project);
+            if (!WaitNamedPipe(name, 0) && System.Runtime.InteropServices.Marshal.GetLastWin32Error() == 2) return null;
+            throw new IOException("The project runtime is busy or did not answer. Retry with the same request identity; its state is unknown.");
+        }
         using var reader = new StreamReader(pipe, Encoding.UTF8, false, 4096, true);
         using var writer = new StreamWriter(pipe, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
         await writer.WriteLineAsync(JsonSerializer.Serialize(request, ProjectBroker.Wire).AsMemory(), cancel);

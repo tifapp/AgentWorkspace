@@ -126,6 +126,7 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
             work.Title = parent?.ShortTask;
             work.Workspace = Path.Combine(_store.Root, "workspaces", work.Id);
             _state.Work.Add(work);
+            UpdateMapStatuses();
             Event(work.Id, "Started", "Preparing a private Codex work unit.");
             Save();
         }
@@ -282,8 +283,9 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
                 work.IntegratedCommit = commit; work.PendingCommit = null; _state.IntegratedCommit = commit;
                 work.Status = WorkStatus.Completed; work.UpdatedAt = DateTimeOffset.UtcNow;
                 work.Detail = "Validated and integrated into agent-os/integrated. Your checked-out branch has not been switched.";
-                Event(work.Id, "Completed", work.Detail);
+                UpdateMapStatuses(); Event(work.Id, "Completed", work.Detail);
             });
+            ScheduleSelectedMapTasks();
         }
         finally { _publication.Release(); }
     }
@@ -391,6 +393,24 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
     public void Cancel(string id)
     {
         var work = Find(id);
+        List<string> graph = [];
+        lock (_sync)
+        {
+            var map = _state.Maps.FirstOrDefault(m => m.Tasks.Any(t => t.WorkIds?.Contains(id) == true || t.WorkId == id));
+            if (map != null && map.Status != MapStatus.Canceled)
+            {
+                map.Status = MapStatus.Canceled; map.Revision++;
+                graph = map.Tasks.SelectMany(t => t.WorkIds ?? []).Concat(map.Tasks.Select(t => t.WorkId).OfType<string>()).Distinct().ToList();
+                UpdateMapStatuses(); Save();
+            }
+        }
+        foreach (var target in graph)
+        {
+            var owned = Find(target);
+            if (owned.Status == WorkStatus.Completed) continue;
+            if (_tokens.TryGetValue(target, out var token)) token.Cancel();
+            if (!owned.IsActive) Set(owned, WorkStatus.Canceled, "Canceled with the selected map. Private files and evidence are retained.");
+        }
         if (work.Status == WorkStatus.Completed) return;
         if (_tokens.TryGetValue(id, out var source)) source.Cancel();
         if (!work.IsActive) Set(work, WorkStatus.Canceled, "Canceled. Private files and evidence are retained.");
@@ -422,7 +442,11 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
     }
     private string LogPath(WorkUnit work, string name) { var path = Path.Combine(_store.Root, "evidence", work.Id); Directory.CreateDirectory(path); return Path.Combine(path, name); }
     private WorkUnit Find(string id) { lock (_sync) return _state.Work.Single(x => x.Id == id); }
-    private void Set(WorkUnit work, WorkStatus status, string detail) => Mutate(() => { work.Status = status; work.Detail = detail; work.UpdatedAt = DateTimeOffset.UtcNow; UpdateMapStatuses(); Event(work.Id, status.ToString(), detail); });
+    private void Set(WorkUnit work, WorkStatus status, string detail)
+    {
+        Mutate(() => { work.Status = status; work.Detail = detail; work.UpdatedAt = DateTimeOffset.UtcNow; UpdateMapStatuses(); Event(work.Id, status.ToString(), detail); });
+        if (status == WorkStatus.Completed) ScheduleSelectedMapTasks();
+    }
     private void Event(string? id, string kind, string message)
     { _state.Events.Add(new(DateTimeOffset.UtcNow, id, kind, message)); if (_state.Events.Count > 1000) _state.Events.RemoveRange(0, _state.Events.Count - 1000); }
     private void Save() => _store.Save(_state);
