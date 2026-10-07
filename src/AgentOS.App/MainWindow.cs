@@ -27,6 +27,7 @@ public sealed class MainWindow : Window
     readonly TextBox validation = new() { Header = "Validation command (PowerShell syntax)", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = 72 };
     readonly CheckBox auto = new() { Content = "Validate and integrate automatically", IsChecked = true };
     readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromMilliseconds(800) };
+    DispatcherTimer? previewUpdateTimer;
     readonly Dictionary<string, TaskRow> rows = new();
     readonly string settings = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"AgentOS","desktop.json");
     ProjectRuntime? runtime; ProjectState? snapshot; string? dataRoot, selected;
@@ -52,7 +53,10 @@ public sealed class MainWindow : Window
         AutomationProperties.SetAutomationId(decisions,"PendingDecisions"); controls.Children.Add(decisions);
         if(previewMode)
         {
-            controls.Children.Add(Action("Update sample",()=>{previewUpdated=!previewUpdated;ApplySnapshot(PreviewData.Create(previewUpdated,previewEmpty));return Task.CompletedTask;},"PreviewUpdate"));
+            var previewUpdate = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(750) };
+            previewUpdateTimer = previewUpdate;
+            previewUpdate.Tick += (_,_) => { previewUpdate.Stop(); if(!closing)ApplySnapshot(PreviewData.Create(previewUpdated,previewEmpty)); };
+            controls.Children.Add(Action("Update sample",()=>{previewUpdated=!previewUpdated;previewUpdate.Stop();previewUpdate.Start();return Task.CompletedTask;},"PreviewUpdate"));
             controls.Children.Add(Action("Toggle empty",()=>{previewEmpty=!previewEmpty;ApplySnapshot(PreviewData.Create(previewUpdated,previewEmpty));return Task.CompletedTask;},"PreviewReset"));
         }
         header.Children.Add(controls);root.Children.Add(header);
@@ -77,7 +81,7 @@ public sealed class MainWindow : Window
         Shortcut(VirtualKey.N,VirtualKeyModifiers.Control,()=>{if(detailsOpen&&!wide)CloseDetails();prompt.Focus(FocusState.Programmatic);});
         Shortcut(VirtualKey.Enter,VirtualKeyModifiers.Control,()=>{if(prompt.FocusState!=FocusState.Unfocused&&!previewMode)_=Guard(SendTask);});
         Shortcut(VirtualKey.Escape,VirtualKeyModifiers.None,()=>{CloseDetails();notice.IsOpen=false;});
-        AppWindow.Closing+=async (_,e)=>{if(closing)return; e.Cancel=true; closing=true; timer.Stop(); if(runtime!=null)await runtime.DisposeAsync(); Close();};
+        AppWindow.Closing+=async (_,e)=>{if(closing)return; e.Cancel=true; closing=true; timer.Stop(); previewUpdateTimer?.Stop(); if(runtime!=null)await runtime.DisposeAsync(); Close();};
         timer.Tick+=async(_,_)=>{Refresh();if(detailsOpen&&transcriptExpander.IsExpanded)await LoadTranscript();}; timer.Start(); transcriptExpander.Content=liveTranscript;transcriptExpander.Expanding+=async(_,_)=>await LoadTranscript();
         root.Loaded+=async (_,_)=>await Guard(Initialize);
     }

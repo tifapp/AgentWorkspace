@@ -1,6 +1,7 @@
 ﻿param([Parameter(Mandatory)][string]$App,[Parameter(Mandatory)][string]$Output)
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
+Add-Type -Namespace PreviewNative -Name Window -MemberDefinition '[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool SetForegroundWindow(System.IntPtr handle);'
 if(!(Test-Path -LiteralPath $App)){throw "App not found: $App"}
 New-Item -ItemType Directory -Force -Path $Output | Out-Null
 $owned=Start-Process -FilePath (Resolve-Path $App) -ArgumentList '--ui-preview' -PassThru -WindowStyle Hidden
@@ -75,7 +76,20 @@ try {
  $follow=RequireId 'FollowUpPrompt' $completed
  $follow.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('Keep follow-up draft')
  $draft=RequireId 'TaskPrompt';$draft.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('Keep task draft')
- InvokeId 'PreviewUpdate';Start-Sleep -Milliseconds 200
+ $running=RequireId 'TaskRow_preview-running'
+ if($running.Current.Name -notlike 'Running:*'){throw "Sample running row was not Running before update: $($running.Current.Name)"}
+ if(![PreviewNative.Window]::SetForegroundWindow($owned.MainWindowHandle)){throw 'Could not activate the owned preview window.'}
+ InvokeId 'PreviewUpdate'
+ $follow.SetFocus()
+ if(!(RequireId 'FollowUpPrompt' $completed).Current.HasKeyboardFocus){throw 'Follow-up prompt did not gain keyboard focus before update.'}
+ $clock=[System.Diagnostics.Stopwatch]::StartNew()
+ do {
+  $running=RequireId 'TaskRow_preview-running'
+  if($running.Current.Name -like 'Validating:*'){break}
+  Start-Sleep -Milliseconds 75
+ } while($clock.Elapsed.TotalSeconds -lt 5)
+ if($running.Current.Name -notlike 'Validating:*'){throw 'Sample running row did not change from Running to Validating.'}
+ if(!(RequireId 'FollowUpPrompt' $completed).Current.HasKeyboardFocus){throw 'Follow-up prompt lost keyboard focus after update.'}
  if((RequireId 'TaskPrompt').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value -ne 'Keep task draft'){throw 'Task draft was lost after update.'}
  $completed=CompletedRowInView 'FollowUpPrompt'
  if((RequireId 'FollowUpPrompt' $completed).GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value -ne 'Keep follow-up draft'){throw 'Follow-up draft was lost.'}
