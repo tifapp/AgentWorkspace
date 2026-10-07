@@ -10,10 +10,10 @@ public static class ExternalEffectTests
  static async Task Refuses(Func<Task> operation,string message){try{await operation();}catch(InvalidOperationException){return;}throw new Exception(message);}
  sealed class Credentials:IScopedCredentialProvider{public string? GetSecret(string target)=>target=="AgentOS/GitHub/api.github.com/acme/repo"?"fixture-token":null;}
  sealed class Handler(Func<HttpRequestMessage,Task<HttpResponseMessage>> send):HttpMessageHandler
- {protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken cancellationToken)=>send(request);}
+ {protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken cancellationToken){var result=await send(request);result.RequestMessage??=request;return result;}}
  static EffectScope Scope(string operation="pull_request",string? old=null)
  {
-  var sha=new string('a',40);var parameters=JsonSerializer.Serialize(new GitHubEffect("https://api.github.com","acme","repo","agent/test",sha,old,"main","Reviewed change","Body"));
+  var sha=new string('a',40);var parameters=JsonSerializer.Serialize(new GitHubEffect("https://api.github.com","acme","repo","agent/test",sha,old,"main","Reviewed change","Body",null,sha));
   return new("github",sha,new string('B',64),new string('C',64),new string('D',64),new string('E',64),"https://api.github.com/acme/repo",operation,parameters);
  }
  static HttpResponseMessage Reply(HttpStatusCode status,string json)=>new(status){Content=new StringContent(json,Encoding.UTF8,"application/json")};
@@ -34,7 +34,7 @@ public static class ExternalEffectTests
 
    var prJournal=new EffectIntentJournal(Path.Combine(root,"lost-response"));var posts=0;var checks=0;
    var sha=new string('a',40);var branch="{\"object\":{\"sha\":\""+sha+"\"}}";
-   var pr="[{\"head\":{\"sha\":\""+sha+"\"},\"state\":\"open\",\"title\":\"Reviewed change\",\"body\":\"Body\",\"number\":7}]";
+   var pr="[{\"head\":{\"sha\":\""+sha+"\"},\"base\":{\"sha\":\""+sha+"\"},\"state\":\"open\",\"title\":\"Reviewed change\",\"body\":\"Body\",\"number\":7}]";
    var handler=new Handler(req=>
    {
     if(req.RequestUri!.AbsolutePath.EndsWith("/pulls")&&req.Method==HttpMethod.Post){posts++;throw new IOException("response lost");}
@@ -63,3 +63,5 @@ public static class ExternalEffectTests
   finally{Directory.Delete(root,true);}
  }
 }
+
+

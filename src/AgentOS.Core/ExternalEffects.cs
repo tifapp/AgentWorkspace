@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -14,7 +14,7 @@ public sealed record EffectScope(string Kind, string CandidateCommit, string Evi
     {
         if (new[] { Kind, CandidateCommit, EvidenceSha256, ArtifactSha256, CommandSha256, EnvironmentSha256, Destination, Operation, ParametersJson }.Any(string.IsNullOrWhiteSpace)) throw new ArgumentException("Complete immutable scope required.");
         if (new[] { EvidenceSha256, ArtifactSha256, CommandSha256, EnvironmentSha256 }.Any(x => !System.Text.RegularExpressions.Regex.IsMatch(x, "^[A-F0-9]{64}$"))) throw new ArgumentException("Scope hashes must be uppercase SHA-256.");
-        if (ParametersJson.Length > 65536) throw new ArgumentException("Parameters too large.");
+        if (ParametersJson.Length > 6291456) throw new ArgumentException("Parameters too large.");
         using var _ = JsonDocument.Parse(ParametersJson);
     }
 }
@@ -126,12 +126,12 @@ public sealed class WindowsCredentialManagerProvider : IScopedCredentialProvider
     public string? GetSecret(string target)
     {
         if (!OperatingSystem.IsWindows()) return null;
-        if (!target.StartsWith("AgentOS/GitHub/", StringComparison.Ordinal) || target.Length > 256) throw new ArgumentException("Unscoped credential target.");
+        if (!(target.StartsWith("AgentOS/GitHub/", StringComparison.Ordinal) || target.StartsWith("AgentOS/PostgreSQL/", StringComparison.Ordinal) || target.StartsWith("AgentOS/Deployment/", StringComparison.Ordinal)) || target.Length > 256) throw new ArgumentException("Unscoped credential target.");
         if (!CredRead(target, 1, 0, out var ptr)) return null;
         try
         {
             var c = Marshal.PtrToStructure<Credential>(ptr);
-            if (c.CredentialBlobSize is 0 or > 8192) return null;
+            if (c.Persist < 2 || c.CredentialBlobSize is 0 or > 8192) return null;
             var bytes = new byte[c.CredentialBlobSize]; Marshal.Copy(c.CredentialBlob, bytes, 0, bytes.Length);
             try { return Encoding.Unicode.GetString(bytes).TrimEnd('\0'); }
             finally { CryptographicOperations.ZeroMemory(bytes); }
@@ -139,7 +139,7 @@ public sealed class WindowsCredentialManagerProvider : IScopedCredentialProvider
         finally { CredFree(ptr); }
     }
 }
-public sealed record GitHubEffect(string ApiOrigin, string Owner, string Repository, string Branch, string Commit, string? ExpectedOldCommit, string? BaseBranch, string? PullTitle, string? PullBody);
+public sealed record GitHubEffect(string ApiOrigin, string Owner, string Repository, string Branch, string Commit, string? ExpectedOldCommit, string? BaseBranch, string? PullTitle, string? PullBody, GitObjectSnapshot? Snapshot = null, string? ExpectedBaseCommit = null);
 public sealed class GitHubEffects : EffectAdapterBase
 {
     private readonly HttpClient client; private readonly IScopedCredentialProvider credentials; private readonly HashSet<string> origins;
@@ -165,9 +165,9 @@ public sealed class GitHubEffects : EffectAdapterBase
             !System.Text.RegularExpressions.Regex.IsMatch(s.Repository, "^[A-Za-z0-9_.-]{1,100}$") ||
             s.Branch.StartsWith('-') || s.Branch.Contains("..") || s.Branch.Contains("@{") ||
             !System.Text.RegularExpressions.Regex.IsMatch(s.Branch, "^[A-Za-z0-9_./-]{1,200}$") ||
-            value.Scope.Destination != s.ApiOrigin + "/" + s.Owner + "/" + s.Repository)
+            value.Scope.Destination != s.ApiOrigin + "/" + s.Owner + "/" + s.Repository || s.BaseBranch == null || !System.Text.RegularExpressions.Regex.IsMatch(s.BaseBranch,"^[A-Za-z0-9_./-]{1,200}$") || s.BaseBranch.Contains("..") || s.BaseBranch.Contains("@{") || (value.Scope.Operation == "pull_request" && (s.ExpectedBaseCommit == null || !System.Text.RegularExpressions.Regex.IsMatch(s.ExpectedBaseCommit,"^[a-fA-F0-9]{40}$")))
             throw new InvalidDataException("GitHub scope mismatch.");
-        return s;
+        s.Snapshot?.Validate(s.Commit); return s;
     }
     private async Task<(HttpStatusCode, JsonDocument?)> Send(GitHubEffect s, HttpMethod method, string path, object? body, CancellationToken ct)
     {
@@ -182,13 +182,43 @@ public sealed class GitHubEffects : EffectAdapterBase
         using var response = await client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
         // Injected clients must disable automatic redirects. A redirect endpoint is never approved.
         if (response.RequestMessage?.RequestUri != requestedUri || (int)response.StatusCode is >= 300 and < 400) throw new InvalidOperationException("GitHub redirect rejected.");
-        if (response.Content.Headers.ContentLength > 1048576) throw new InvalidDataException("Response too large.");
+        if (response.Content.Headers.ContentLength > 6291456) throw new InvalidDataException("Response too large.");
         await using var input = await response.Content.ReadAsStreamAsync(ct); using var bytes = new MemoryStream(); var buffer = new byte[8192]; int n;
-        while ((n = await input.ReadAsync(buffer, ct)) != 0) { if (bytes.Length + n > 1048576) throw new InvalidDataException("Response too large."); bytes.Write(buffer, 0, n); }
+        while ((n = await input.ReadAsync(buffer, ct)) != 0) { if (bytes.Length + n > 6291456) throw new InvalidDataException("Response too large."); bytes.Write(buffer, 0, n); }
         bytes.Position = 0; return (response.StatusCode, bytes.Length == 0 ? null : JsonDocument.Parse(bytes));
     }
     private static string E(string s) => Uri.EscapeDataString(s);
     private static string Repo(GitHubEffect s) => "/repos/" + E(s.Owner) + "/" + E(s.Repository);
+    private async Task<bool> CommitMatches(GitHubEffect s,CancellationToken ct)
+    {
+        var(status,doc)=await Send(s,HttpMethod.Get,Repo(s)+"/git/commits/"+s.Commit,null,ct);
+        using(doc){if(status==HttpStatusCode.NotFound)return false;if(status!=HttpStatusCode.OK||doc==null)throw new InvalidDataException("Commit lookup inconclusive.");
+            if(!string.Equals(doc.RootElement.GetProperty("sha").GetString(),s.Commit,StringComparison.OrdinalIgnoreCase))throw new InvalidDataException("Commit SHA mismatch.");
+            if(s.Snapshot==null)return true;return doc.RootElement.GetProperty("tree").GetProperty("sha").GetString()==s.Snapshot.Commit.Tree&&doc.RootElement.GetProperty("parents").EnumerateArray().Select(x=>x.GetProperty("sha").GetString()).SequenceEqual(s.Snapshot.Commit.Parents);}
+    }
+    private async Task<bool> BaseMatches(GitHubEffect s,CancellationToken ct)
+    {
+        if(s.BaseBranch==null||s.ExpectedBaseCommit==null)return false;
+        var(status,doc)=await Send(s,HttpMethod.Get,Repo(s)+"/git/ref/heads/"+string.Join('/',s.BaseBranch.Split('/').Select(E)),null,ct);
+        using(doc){if(status!=HttpStatusCode.OK||doc==null)throw new InvalidDataException("PR base lookup inconclusive.");return string.Equals(doc.RootElement.GetProperty("object").GetProperty("sha").GetString(),s.ExpectedBaseCommit,StringComparison.OrdinalIgnoreCase);}
+    }
+    private async Task<bool> Exists(GitHubEffect s,string type,string sha,CancellationToken ct)
+    {
+        var(status,doc)=await Send(s,HttpMethod.Get,Repo(s)+"/git/"+type+"/"+sha,null,ct);
+        using(doc){if(status==HttpStatusCode.NotFound)return false;if(status!=HttpStatusCode.OK||doc==null||!string.Equals(doc.RootElement.GetProperty("sha").GetString(),sha,StringComparison.OrdinalIgnoreCase))throw new InvalidDataException("Git object lookup inconclusive.");return true;}
+    }
+    private async Task Upload(GitHubEffect s,CancellationToken ct)
+    {
+        var snapshot=s.Snapshot??throw new InvalidDataException("Approved Git object snapshot required.");snapshot.Validate(s.Commit);
+        foreach(var parent in snapshot.Commit.Parents)if(!await Exists(s,"commits",parent,ct))throw new InvalidDataException("Commit parent absent remotely.");
+        foreach(var obj in snapshot.Objects){ct.ThrowIfCancellationRequested();var plural=obj.Type=="blob"?"blobs":"trees";if(await Exists(s,plural,obj.Sha,ct))continue;
+            object body=obj.Type=="blob"?new{content=obj.Base64,encoding="base64"}:new{tree=obj.Entries!.Select(e=>new{path=e.Path,mode=e.Mode=="40000"?"040000":e.Mode,type=e.Type,sha=e.Sha}).ToArray()};
+            var(status,doc)=await Send(s,HttpMethod.Post,Repo(s)+"/git/"+plural,body,ct);using(doc){if(status!=HttpStatusCode.Created||doc==null||!string.Equals(doc.RootElement.GetProperty("sha").GetString(),obj.Sha,StringComparison.OrdinalIgnoreCase))throw new InvalidDataException("Git Data API returned different object SHA.");}}
+        if(await CommitMatches(s,ct))return;var c=snapshot.Commit;
+        var(created,response)=await Send(s,HttpMethod.Post,Repo(s)+"/git/commits",new{message=c.Message,tree=c.Tree,parents=c.Parents,author=new{name=c.AuthorName,email=c.AuthorEmail,date=c.AuthorDate},committer=new{name=c.CommitterName,email=c.CommitterEmail,date=c.CommitterDate}},ct);
+        using(response){if(created!=HttpStatusCode.Created||response==null||!string.Equals(response.RootElement.GetProperty("sha").GetString(),s.Commit,StringComparison.OrdinalIgnoreCase))throw new InvalidDataException("Git Data API cannot reproduce exact approved commit SHA.");}
+        if(!await CommitMatches(s,ct))throw new InvalidDataException("Uploaded commit tree or parents differ.");
+    }
     private async Task<EffectOutcome> Branch(GitHubEffect s, CancellationToken ct)
     {
         var (status, doc) = await Send(s, HttpMethod.Get, Repo(s) + "/git/ref/heads/" + string.Join('/', s.Branch.Split('/').Select(E)), null, ct);
@@ -197,7 +227,7 @@ public sealed class GitHubEffects : EffectAdapterBase
             if (status == HttpStatusCode.NotFound) return new(ExternalEffectState.Prepared, "Branch absent.");
             if (status != HttpStatusCode.OK || doc == null) return new(ExternalEffectState.Unknown, "Branch lookup inconclusive.");
             var actual = doc.RootElement.GetProperty("object").GetProperty("sha").GetString();
-            return string.Equals(actual, s.Commit, StringComparison.OrdinalIgnoreCase) ? new(ExternalEffectState.Completed, "Exact branch commit confirmed.", s.Branch) : new(ExternalEffectState.Stale, "Branch points to another commit.");
+            if(!string.Equals(actual,s.Commit,StringComparison.OrdinalIgnoreCase))return new(ExternalEffectState.Stale,"Branch points to another commit."); return s.Snapshot==null||await CommitMatches(s,ct)?new(ExternalEffectState.Completed,"Exact branch commit confirmed.",s.Branch):new(ExternalEffectState.Stale,"Branch commit tree or parents differ.");
         }
     }
     private async Task<EffectOutcome> Pull(GitHubEffect s, CancellationToken ct)
@@ -209,7 +239,7 @@ public sealed class GitHubEffects : EffectAdapterBase
             if (doc.RootElement.GetArrayLength() == 100) return new(ExternalEffectState.Unknown, "PR results truncated; no create attempted.");
             foreach (var pr in doc.RootElement.EnumerateArray())
             {
-                if (!string.Equals(pr.GetProperty("head").GetProperty("sha").GetString(), s.Commit, StringComparison.OrdinalIgnoreCase) || pr.GetProperty("state").GetString() != "open" || pr.GetProperty("title").GetString() != s.PullTitle || (pr.GetProperty("body").GetString() ?? "") != (s.PullBody ?? "")) return new(ExternalEffectState.Stale, "Existing PR differs from approved scope.");
+                if (!string.Equals(pr.GetProperty("head").GetProperty("sha").GetString(), s.Commit, StringComparison.OrdinalIgnoreCase) || pr.GetProperty("state").GetString() != "open" || !string.Equals(pr.GetProperty("base").GetProperty("sha").GetString(),s.ExpectedBaseCommit,StringComparison.OrdinalIgnoreCase) || pr.GetProperty("title").GetString() != s.PullTitle || (pr.GetProperty("body").GetString() ?? "") != (s.PullBody ?? "")) return new(ExternalEffectState.Stale, "Existing PR differs from approved scope.");
                 return new(ExternalEffectState.Completed, "Exact PR confirmed.", pr.GetProperty("number").GetInt32().ToString());
             }
             return new(ExternalEffectState.Prepared, "No matching PR.");
@@ -224,14 +254,19 @@ public sealed class GitHubEffects : EffectAdapterBase
             if (observed.State == ExternalEffectState.Completed) return observed;
             if (observed.State == ExternalEffectState.Stale) return new(ExternalEffectState.Stale, "Existing ref differs; REST has no atomic expected-old guard.");
             if (observed.State != ExternalEffectState.Prepared) return observed;
+            if(s.ExpectedOldCommit!=null)return new(ExternalEffectState.Stale,"Only expected-absent ref creation supported.");
+            await Upload(s,ct);
             var (status, doc) = await Send(s, HttpMethod.Post, Repo(s) + "/git/refs", new { @ref = "refs/heads/" + s.Branch, sha = s.Commit }, ct);
             using (doc) { var result = await Branch(s, ct); return result.State == ExternalEffectState.Prepared ? new(ExternalEffectState.Unknown, "Branch creation unconfirmed; no automatic retry.") : result; }
         }
         if (value.Scope.Operation == "pull_request")
         {
             if (string.IsNullOrWhiteSpace(s.BaseBranch) || string.IsNullOrWhiteSpace(s.PullTitle)) return new(ExternalEffectState.Stale, "PR base and title required.");
+            if(!await BaseMatches(s,ct))return new(ExternalEffectState.Stale,"PR base commit changed.");
             var branch = await Branch(s, ct); if (branch.State != ExternalEffectState.Completed) return branch;
             var existing = await Pull(s, ct); if (existing.State != ExternalEffectState.Prepared) return existing;
+            if(!await BaseMatches(s,ct))return new(ExternalEffectState.Stale,"PR base commit changed before creation.");
+            var headAgain=await Branch(s,ct);if(headAgain.State!=ExternalEffectState.Completed)return headAgain;
             var (status, doc) = await Send(s, HttpMethod.Post, Repo(s) + "/pulls", new { head = s.Branch, @base = s.BaseBranch, title = s.PullTitle, body = s.PullBody ?? "" }, ct);
             using (doc) { var result = await Pull(s, ct); return result.State == ExternalEffectState.Prepared ? new(ExternalEffectState.Unknown, "PR creation unconfirmed; no automatic retry.") : result; }
         }
@@ -240,9 +275,9 @@ public sealed class GitHubEffects : EffectAdapterBase
     protected override Task<EffectOutcome> CheckAsync(EffectIntent value, CancellationToken ct)
     { var s = Spec(value); return CheckRemote(s, value.Scope.Operation, ct); }
     private async Task<EffectOutcome> CheckRemote(GitHubEffect s, string operation, CancellationToken ct)
-    { var result = operation == "branch" ? await Branch(s, ct) : await Pull(s, ct); return result.State == ExternalEffectState.Prepared ? new(ExternalEffectState.Unknown, "Remote operation absent; no automatic retry.") : result; }
+    { var result = operation == "branch" ? await Branch(s, ct) : await Pull(s, ct); return result.State is ExternalEffectState.Prepared or ExternalEffectState.Stale ? new(ExternalEffectState.Unknown, "Historical remote outcome requires manual review; no retry.") : result; }
 }
-public sealed record DeploymentEffect(string Backend, string ArtifactSha256, string CommandSha256, string EnvironmentSha256, string Destination);
+public sealed record DeploymentEffect(string Backend, string ArtifactSha256, string CommandSha256, string EnvironmentSha256, string Destination, DeploymentReceiptContract? Receipt = null);
 public sealed record DeploymentCapability(string Backend, string IsolationKind, string Destination, bool Verified);
 public interface IIsolatedDeploymentExecutor
 {
@@ -250,7 +285,7 @@ public interface IIsolatedDeploymentExecutor
     Task<EffectOutcome> ExecuteAsync(string operationId, DeploymentEffect effect, CancellationToken ct);
     Task<EffectOutcome> ReconcileAsync(string operationId, DeploymentEffect effect, CancellationToken ct);
 }
-public sealed class DeploymentEffects(EffectIntentJournal journal, IIsolatedDeploymentExecutor? executor) : EffectAdapterBase(journal, "deployment")
+public sealed class DeploymentEffects(EffectIntentJournal journal, IIsolatedDeploymentExecutor? executor, DeploymentReceiptProbe? receipts = null) : EffectAdapterBase(journal, "deployment")
 {
     private DeploymentEffect Spec(EffectIntent value)
     {
@@ -263,16 +298,28 @@ public sealed class DeploymentEffects(EffectIntentJournal journal, IIsolatedDepl
         var s = Spec(value);
         if (executor == null || !executor.Capability.Verified || executor.Capability.IsolationKind != "vm" || executor.Capability.Backend != s.Backend || executor.Capability.Destination != s.Destination)
             return Task.FromResult(new EffectOutcome(ExternalEffectState.Unavailable, "Isolated VM executor unavailable; confinement unproven."));
-        return executor.ExecuteAsync(value.Id, s, ct);
+        return ApplyWithReceipt(value,s,ct);
+    }
+    private async Task<EffectOutcome> ApplyWithReceipt(EffectIntent value,DeploymentEffect s,CancellationToken ct)
+    {
+        if(s.Receipt==null||receipts==null)return new(ExternalEffectState.Unavailable,"Remote applied receipt contract unavailable.");
+        DeploymentReceiptProbe.Validate(s.Receipt);
+        var result=await executor!.ExecuteAsync(value.Id,s,ct);
+        if(result.State is ExternalEffectState.Stale or ExternalEffectState.Unavailable)return result;
+        return await receipts.CheckAsync(value.Id,value.Scope,s.Receipt,ct);
     }
     protected override Task<EffectOutcome> CheckAsync(EffectIntent value, CancellationToken ct)
     {
         var s = Spec(value);
-        if (executor == null || !executor.Capability.Verified || executor.Capability.IsolationKind != "vm" || executor.Capability.Backend != s.Backend || executor.Capability.Destination != s.Destination)
-            return Task.FromResult(new EffectOutcome(ExternalEffectState.Unknown, "VM executor unavailable; remote outcome unknown."));
-        return executor.ReconcileAsync(value.Id, s, ct);
+        return s.Receipt==null||receipts==null ? Task.FromResult(new EffectOutcome(ExternalEffectState.Unknown,"Remote applied receipt contract unavailable.")) : receipts.CheckAsync(value.Id,value.Scope,s.Receipt,ct);
     }
 }
+
+
+
+
+
+
 
 
 

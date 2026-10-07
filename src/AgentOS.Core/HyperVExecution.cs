@@ -11,9 +11,11 @@ internal sealed record HyperVOwner(Guid VmId,string Nonce,string OperationId,str
 internal sealed record HyperVManifest(string Mode,HyperVOwner Owner,HyperVProfile Profile,string Command,DeploymentEffect Effect,string[] Ips,string ArtifactPath,string ReceiptPath,string EvidenceSha256);
 public sealed class HyperVExecution : IIsolatedDeploymentExecutor
 {
- readonly string root,dataRoot;readonly HyperVProfile profile;readonly DeploymentEffectSettings settings;readonly Func<string,Task<string>> artifact;
+ readonly string root,dataRoot;readonly HyperVProfile profile;readonly DeploymentEffectSettings settings;readonly Func<string,Task<byte[]>> artifact;
  public DeploymentCapability Capability {get;}
  public HyperVExecution(string dataRoot,HyperVProfile profile,DeploymentEffectSettings settings,Func<string,Task<string>> artifact)
+ {this.dataRoot=Path.GetFullPath(dataRoot);root=Path.Combine(this.dataRoot,"hyperv-operations");this.profile=profile;this.settings=settings;this.artifact=async commit=>Encoding.UTF8.GetBytes(await artifact(commit));Capability=new("hyperv","vm",settings.Destination,Probe(profile).Available);}
+ public HyperVExecution(string dataRoot,HyperVProfile profile,DeploymentEffectSettings settings,Func<string,Task<byte[]>> artifact)
  {this.dataRoot=Path.GetFullPath(dataRoot);root=Path.Combine(this.dataRoot,"hyperv-operations");this.profile=profile;this.settings=settings;this.artifact=artifact;Capability=new("hyperv","vm",settings.Destination,Probe(profile).Available);}
  public static HyperVProbe Probe(HyperVProfile? p,bool requireSwitch=true)
  {
@@ -65,7 +67,7 @@ public sealed class HyperVExecution : IIsolatedDeploymentExecutor
  EffectScope ScopeFor(string id,DeploymentEffect effect)
  {
   var scope=new EffectIntentJournal(Path.Combine(dataRoot,"external-effects")).Read(id)?.Scope??throw new InvalidDataException("Effect scope unavailable.");
-  if(scope.Kind!="deployment"||scope.Operation!="deploy"||JsonSerializer.Deserialize<DeploymentEffect>(scope.ParametersJson)!=effect||scope.ArtifactSha256!=effect.ArtifactSha256||scope.CommandSha256!=effect.CommandSha256||scope.EnvironmentSha256!=effect.EnvironmentSha256||scope.Destination!=effect.Destination)throw new InvalidDataException("Deployment scope changed.");
+  if(scope.Kind!="deployment"||scope.Operation!="deploy"||JsonSerializer.Serialize(effect)!=scope.ParametersJson||scope.ArtifactSha256!=effect.ArtifactSha256||scope.CommandSha256!=effect.CommandSha256||scope.EnvironmentSha256!=effect.EnvironmentSha256||scope.Destination!=effect.Destination)throw new InvalidDataException("Deployment scope changed.");
   scope.Validate();return scope;
  }
  internal static void Save<T>(string path,T value){var temp=path+"."+Guid.NewGuid().ToString("N")+".tmp";try{File.WriteAllText(temp,JsonSerializer.Serialize(value));File.Move(temp,path,true);}finally{if(File.Exists(temp))File.Delete(temp);}}
@@ -74,7 +76,7 @@ public sealed class HyperVExecution : IIsolatedDeploymentExecutor
   var probe=Probe(profile);if(!probe.Available)return new(ExternalEffectState.Unavailable,probe.Reason);
   if(effect.Backend!="hyperv"||effect.Destination!=settings.Destination||effect.CommandSha256!=H(settings.Command))return new(ExternalEffectState.Stale,"Deployment settings changed.");
   var scope=ScopeFor(id,effect);var source=await artifact(scope.CandidateCommit);
-  if(H(source)!=effect.ArtifactSha256)return new(ExternalEffectState.Stale,"Source artifact changed.");
+  if(Convert.ToHexString(SHA256.HashData(source))!=effect.ArtifactSha256)return new(ExternalEffectState.Stale,"Source artifact changed.");
   string[] ips;try{ips=Resolve(profile,effect.Destination);}catch{return new(ExternalEffectState.Unavailable,"Pinned destination resolution unavailable or changed.");}
   var dir=Dir(root,id);if(Directory.Exists(dir))return new(ExternalEffectState.Unknown,"Owned operation record exists; reconcile before retry.");
   Directory.CreateDirectory(dir);
@@ -82,7 +84,7 @@ public sealed class HyperVExecution : IIsolatedDeploymentExecutor
   Save(Path.Combine(dir,"owner.json"),owner);
   try
   {
-   await File.WriteAllTextAsync(Path.Combine(dir,"artifact.bin"),source,ct);
+   await File.WriteAllBytesAsync(Path.Combine(dir,"artifact.bin"),source,ct);
    var manifest=Path.Combine(dir,"manifest.json");
    Save(manifest,new HyperVManifest("run",owner,profile,settings.Command,effect,ips,Path.Combine(dir,"artifact.bin"),Path.Combine(dir,"receipt.json"),scope.EvidenceSha256));
    await Invoke(manifest,ct);return ReadOutcome(dir,id,scope);
@@ -420,3 +422,5 @@ Remove-Item -LiteralPath $m.Disk -Force
 Set-Content -LiteralPath $m.Confirmed -Value $m.Nonce
 ";
 }
+
+

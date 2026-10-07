@@ -1,12 +1,13 @@
+using System.Diagnostics;
 using System.Data.Common;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 namespace AgentOS.Core;
-public sealed record GitHubEffectSettings(string ApiOrigin,string Owner,string Repository,string Branch,string BaseBranch);
-public sealed record PostgreSqlEffectSettings(string Host,int Port,string Database,string Schema,string User);
-public sealed record DeploymentEffectSettings(string Backend,string Destination,string ArtifactPath,string Command,string EnvironmentName);
+public sealed record GitHubEffectSettings(string ApiOrigin,string Owner,string Repository,string Branch,string BaseBranch,string? BaseCommit=null);
+public sealed record PostgreSqlEffectSettings(string Host,int Port,string Database,string Schema,string User,string? TrustedRootCertificate=null,bool SchemaRestrictedRole=false);
+public sealed record DeploymentEffectSettings(string Backend,string Destination,string ArtifactPath,string Command,string EnvironmentName,DeploymentReceiptContract? Receipt=null);
 public sealed record ExternalEffectSettings(GitHubEffectSettings? GitHub=null,PostgreSqlEffectSettings? PostgreSql=null,DeploymentEffectSettings? Deployment=null);
 public sealed record ExternalEffectRequest(string WorkId,string Provider,string Operation,string? SourcePath=null,string? Title=null,string? Body=null);
 public sealed partial class ProjectRuntime
@@ -19,9 +20,9 @@ public sealed partial class ProjectRuntime
  public void ConfigureExternalEffects(ExternalEffectSettings settings)
  {
   ObjectDisposedException.ThrowIf(_disposed,this);
-  if(settings.GitHub is { } g && (!Uri.TryCreate(g.ApiOrigin,UriKind.Absolute,out var uri)||uri.Scheme!="https"||uri.UserInfo.Length!=0||uri.AbsolutePath!="/"||uri.Query.Length!=0||uri.Fragment.Length!=0||!Regex.IsMatch(g.Owner,"^[A-Za-z0-9-]{1,39}$")||!Regex.IsMatch(g.Repository,"^[A-Za-z0-9_.-]{1,100}$")||!Regex.IsMatch(g.Branch,"^[A-Za-z0-9_./-]{1,200}$")||g.Branch.StartsWith('-')||g.Branch.Contains("..")||g.Branch.Contains("@{")||string.IsNullOrWhiteSpace(g.BaseBranch)))throw new ArgumentException("Invalid GitHub settings.");
-  if(settings.PostgreSql is { } p && (string.IsNullOrWhiteSpace(p.Host)||p.Host.Any(c=>!(char.IsLetterOrDigit(c)||c is '.' or '-'))||p.Port is <1 or >65535||!Regex.IsMatch(p.Database,"^[A-Za-z_][A-Za-z0-9_-]{0,62}$")||!Regex.IsMatch(p.Schema,"^[A-Za-z_][A-Za-z0-9_]{0,62}$")||!Regex.IsMatch(p.User,"^[A-Za-z_][A-Za-z0-9_-]{0,62}$")))throw new ArgumentException("Invalid PostgreSQL settings.");
-  if(settings.Deployment is { } d && (new[]{d.Backend,d.Destination,d.ArtifactPath,d.Command,d.EnvironmentName}.Any(string.IsNullOrWhiteSpace)||d.Command.Length>8192))throw new ArgumentException("Invalid deployment settings.");
+  if(settings.GitHub is { } g && (!Uri.TryCreate(g.ApiOrigin,UriKind.Absolute,out var uri)||uri.Scheme!="https"||uri.UserInfo.Length!=0||uri.AbsolutePath!="/"||uri.Query.Length!=0||uri.Fragment.Length!=0||!Regex.IsMatch(g.Owner,"^[A-Za-z0-9-]{1,39}$")||!Regex.IsMatch(g.Repository,"^[A-Za-z0-9_.-]{1,100}$")||!Regex.IsMatch(g.Branch,"^[A-Za-z0-9_./-]{1,200}$")||g.Branch.StartsWith('-')||g.Branch.Contains("..")||g.Branch.Contains("@{")||(!Regex.IsMatch(g.BaseBranch,"^[A-Za-z0-9_./-]{1,200}$")||g.BaseBranch.StartsWith('-')||g.BaseBranch.Contains("..")||g.BaseBranch.Contains("@{")||g.BaseCommit!=null&&!Regex.IsMatch(g.BaseCommit,"^[a-fA-F0-9]{40}$"))))throw new ArgumentException("Invalid GitHub settings.");
+  if(settings.PostgreSql is { } p && (string.IsNullOrWhiteSpace(p.Host)||p.Host.Length>100||p.Host.Any(c=>!(char.IsLetterOrDigit(c)||c is '.' or '-'))||p.Port is <1 or >65535||!Regex.IsMatch(p.Database,"^[A-Za-z_][A-Za-z0-9_-]{0,62}$")||!Regex.IsMatch(p.Schema,"^[a-z_][a-z0-9_]{0,62}$")||!Regex.IsMatch(p.User,"^[A-Za-z_][A-Za-z0-9_-]{0,62}$")||!p.SchemaRestrictedRole||string.IsNullOrWhiteSpace(p.TrustedRootCertificate)||!Path.IsPathFullyQualified(p.TrustedRootCertificate)||!File.Exists(p.TrustedRootCertificate)))throw new ArgumentException("Invalid PostgreSQL settings.");
+  if(settings.Deployment is { } d){if(new[]{d.Backend,d.Destination,d.ArtifactPath,d.Command,d.EnvironmentName}.Any(string.IsNullOrWhiteSpace)||d.Command.Length>8192)throw new ArgumentException("Invalid deployment settings.");if(d.Receipt!=null)DeploymentReceiptProbe.Validate(d.Receipt);}
   Directory.CreateDirectory(_store.Root);var tmp=SettingsFile+"."+Guid.NewGuid().ToString("N")+".tmp";
   try{File.WriteAllText(tmp,JsonSerializer.Serialize(settings));File.Move(tmp,SettingsFile,true);}finally{if(File.Exists(tmp))File.Delete(tmp);}
  }
@@ -38,6 +39,22 @@ public sealed partial class ProjectRuntime
   var data=(await Commands.Git(_state.ProjectPath,"cat-file","blob",oid)).Output;
   if(Encoding.UTF8.GetByteCount(data)!=size||(await Commands.RunAsync("git",["hash-object","--stdin"],_state.ProjectPath,input:data)).Checked()!=oid)throw new InvalidOperationException("Git blob cannot be read byte exactly.");
   return data;
+ }
+ async Task<byte[]> BinaryBlob(string commit,string path,CancellationToken ct=default)
+ {
+  path=PathArg(path);var entry=(await Commands.Git(_state.ProjectPath,"ls-tree",commit,"--",path)).Checked();
+  if(!entry.StartsWith("100644 blob ")&&!entry.StartsWith("100755 blob "))throw new InvalidOperationException("Regular tracked Git blob required.");
+  var oid=entry.Split(' ','\t',StringSplitOptions.RemoveEmptyEntries).ElementAt(2);var size=long.Parse((await Commands.Git(_state.ProjectPath,"cat-file","-s",oid)).Checked());
+  if(size is <1 or >1048576)throw new InvalidDataException("Artifact size exceeds bound.");
+  var psi=new ProcessStartInfo("git"){WorkingDirectory=_state.ProjectPath,UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true};
+  foreach(var arg in new[]{"cat-file","blob",oid})psi.ArgumentList.Add(arg);
+  psi.Environment["GIT_TERMINAL_PROMPT"]="0";psi.Environment["GIT_CONFIG_NOSYSTEM"]="1";psi.Environment["GIT_CONFIG_GLOBAL"]="NUL";
+  using var process=Process.Start(psi)??throw new InvalidOperationException("Git unavailable.");
+  var error=process.StandardError.ReadToEndAsync(ct);using var output=new MemoryStream();var buffer=new byte[8192];int n;
+  try{while((n=await process.StandardOutput.BaseStream.ReadAsync(buffer,ct))!=0){if(output.Length+n>size){process.Kill(true);throw new InvalidDataException("Git blob exceeds approved size.");}output.Write(buffer,0,n);}await process.WaitForExitAsync(ct);}
+  catch(OperationCanceledException){if(!process.HasExited)process.Kill(true);throw;}
+  _=await error;var data=output.ToArray();if(process.ExitCode!=0||data.Length!=size)throw new InvalidDataException("Git blob unavailable.");
+  var framed=Encoding.ASCII.GetBytes("blob "+data.Length+"\0").Concat(data).ToArray();if(Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(framed)).ToLowerInvariant()!=oid)throw new InvalidDataException("Git blob hash mismatch.");return data;
  }
  async Task<(WorkUnit,ValidationEvidence,string)> Verified(string id,CancellationToken ct)
  {
@@ -63,20 +80,20 @@ public sealed partial class ProjectRuntime
   {
    case "github":
     var g=settings.GitHub??throw new InvalidOperationException("GitHub provider is not configured.");
-    if(r.Operation is not("branch" or "pull_request")||r.Operation=="pull_request"&&string.IsNullOrWhiteSpace(r.Title))throw new ArgumentException("Choose branch or titled pull request.");
+    if(r.Operation is not("branch" or "pull_request")||r.Operation=="pull_request"&&(string.IsNullOrWhiteSpace(r.Title)||string.IsNullOrWhiteSpace(g.BaseCommit)))throw new ArgumentException("Choose branch or titled pull request.");
     destination=g.ApiOrigin.TrimEnd('/')+"/"+g.Owner+"/"+g.Repository;
-    parameters=JsonSerializer.Serialize(new GitHubEffect(g.ApiOrigin.TrimEnd('/'),g.Owner,g.Repository,g.Branch,commit,null,g.BaseBranch,r.Title,r.Body));break;
+    var snapshot=await GitObjectSnapshot.CaptureAsync(_state.ProjectPath,commit,ct);if(snapshot.Commit.Tree!=tree||snapshot.Commit.Parents[0]!=e.AgainstCommit)throw new InvalidOperationException("Git snapshot differs from evidence.");parameters=JsonSerializer.Serialize(new GitHubEffect(g.ApiOrigin.TrimEnd('/'),g.Owner,g.Repository,g.Branch,commit,null,g.BaseBranch,r.Title,r.Body,snapshot,g.BaseCommit));break;
    case "postgresql":
     var p=settings.PostgreSql??throw new InvalidOperationException("PostgreSQL provider is not configured.");
     if(r.Operation!="migration")throw new ArgumentException("Choose migration.");
     var sql=await Blob(commit,r.SourcePath??throw new ArgumentException("SQL path required."));
-    command=H(sql);destination=H(p.Host.ToLowerInvariant()+":"+p.Port+"\n"+p.Database);
-    parameters=JsonSerializer.Serialize(new PostgreSqlMigration(destination,p.Schema,r.SourcePath!,sql,command));break;
+    PostgreSqlMigrationGuard.Validate(sql,p.Schema);command=H(sql);environment=H(e.EnvironmentSha256+"\n"+StateStore.HashFile(p.TrustedRootCertificate!));destination=PostgreSqlProvider.EndpointIdentity(p.Host,p.Port,p.Database);
+    parameters=JsonSerializer.Serialize(new PostgreSqlMigration(destination,p.Schema,r.SourcePath!,sql,command,p.User,p.SchemaRestrictedRole,new PostgreSqlEndpoint(p.Host.ToLowerInvariant(),p.Port,p.Database,p.User,p.TrustedRootCertificate!,StateStore.HashFile(p.TrustedRootCertificate!))));break;
    case "deployment":
     var d=settings.Deployment??throw new InvalidOperationException("Deployment provider is not configured.");
     if(r.Operation!="deploy")throw new ArgumentException("Choose deploy.");
-    artifact=H(await Blob(commit,d.ArtifactPath));command=H(d.Command);environment=H(e.EnvironmentSha256+"\n"+d.EnvironmentName);
-    destination=d.Destination;parameters=JsonSerializer.Serialize(new DeploymentEffect(d.Backend,artifact,command,environment,destination));break;
+    artifact=Convert.ToHexString(SHA256.HashData(await BinaryBlob(commit,d.ArtifactPath,ct)));command=H(d.Command);environment=H(e.EnvironmentSha256+"\n"+d.EnvironmentName);
+    destination=d.Destination;parameters=JsonSerializer.Serialize(new DeploymentEffect(d.Backend,artifact,command,environment,destination,d.Receipt));break;
    default:throw new ArgumentException("Unknown provider.");
   }
   return new EffectScope(r.Provider,commit,evidence,artifact,command,environment,destination,r.Operation,parameters);
@@ -85,7 +102,7 @@ public sealed partial class ProjectRuntime
  {
   "github" when ExternalSettings.GitHub is { } g=>new GitHubEffects(Journal,new PersistedGitHubCredentials(),transport,[g.ApiOrigin]),
   "postgresql" when ExternalSettings.PostgreSql is { } p=>new PostgreSqlEffects(Journal,connection??PgConnection(p)),
-  "deployment" when ExternalSettings.Deployment is { } d=>new DeploymentEffects(Journal,executor??ConfiguredDeploymentExecutor(d)),
+  "deployment" when ExternalSettings.Deployment is { } d=>new DeploymentEffects(Journal,executor??ConfiguredDeploymentExecutor(d),new DeploymentReceiptProbe(new WindowsCredentialManagerProvider(),transport)),
   _=>throw new InvalidOperationException(kind+" provider is not configured.")
  };
  IIsolatedDeploymentExecutor? ConfiguredDeploymentExecutor(DeploymentEffectSettings d)
@@ -93,12 +110,17 @@ public sealed partial class ProjectRuntime
   if(d.Backend!="hyperv")return null;
   HyperVProfile? profile;
   try{profile=new ExecutionProfileRegistry(_store.Root).Current.HyperV;}catch{return null;}
-  return profile==null?null:new HyperVExecution(_store.Root,profile,d,commit=>Blob(commit,d.ArtifactPath));
+  return profile==null?null:new HyperVExecution(_store.Root,profile,d,commit=>BinaryBlob(commit,d.ArtifactPath));
  }
- static Func<DbConnection>? PgConnection(PostgreSqlEffectSettings p)
- {var(factory,_)=PostgreSqlProvider.Discover();if(factory==null)return null;var b=new DbConnectionStringBuilder{["Host"]=p.Host,["Port"]=p.Port,["Database"]=p.Database,["Username"]=p.User,["Integrated Security"]=true,["Pooling"]=false};return PostgreSqlProvider.ConnectionFactory(factory,b.ConnectionString);}
+ static Func<DbConnection> PgConnection(PostgreSqlEffectSettings p)=>PostgreSqlProvider.SecureConnectionFactory(p,new WindowsCredentialManagerProvider());
  async Task<T> Guard<T>(Func<Task<T>> f,CancellationToken ct){await _publication.WaitAsync(ct);try{return await f();}finally{_publication.Release();}}
  static string Id(ExternalEffectRequest r)=>H(JsonSerializer.Serialize(r));
+ static string ExternalAdmissionKey(EffectScope scope)
+ {
+  if(scope.Kind=="github"){var g=JsonSerializer.Deserialize<GitHubEffect>(scope.ParametersJson)!;return "external:github:"+new Uri(g.ApiOrigin).Authority.ToLowerInvariant()+"/"+g.Owner.ToLowerInvariant()+"/"+g.Repository.ToLowerInvariant()+"/heads/"+g.Branch;}
+  if(scope.Kind=="postgresql"){var p=JsonSerializer.Deserialize<PostgreSqlMigration>(scope.ParametersJson)!;return "external:postgresql:"+scope.Destination+":"+p.Schema;}
+  return "external:"+scope.Kind+":"+scope.Destination;
+ }
  public Task<EffectIntent> PrepareExternalEffectAsync(ExternalEffectRequest r,CancellationToken ct=default)=>Guard(async()=>{var scope=await Scope(r,ct);return await Adapter(r.Provider,null,null,null).PrepareAsync(Id(r),scope,ct);},ct);
  async Task<(EffectIntent,IEffectAdapter)> Checked(string id,HttpMessageHandler? transport,Func<DbConnection>? connection,IIsolatedDeploymentExecutor? executor,CancellationToken ct)
  {
@@ -115,11 +137,31 @@ public sealed partial class ProjectRuntime
  {
   var(intent,adapter)=await Checked(id,transport,connection,executor,ct);
   if(intent.State is ExternalEffectState.Unknown or ExternalEffectState.InFlight)throw new InvalidOperationException("Unknown outcome requires reconciliation; no replay.");
-  using var ownership=await Coordinator.EnterAsync("external:"+_state.ProjectPath+":"+intent.Scope.Destination,"external effect",null,ct);
+  using var ownership=await Coordinator.EnterAsync(ExternalAdmissionKey(intent.Scope),"external effect",null,ct);
   (_,adapter)=await Checked(id,transport,connection,executor,ct);
   return await adapter.ExecuteAsync(id,ct);
  },ct);
- public Task<EffectIntent> ReconcileExternalEffectAsync(string id,HttpMessageHandler? transport=null,Func<DbConnection>? connection=null,IIsolatedDeploymentExecutor? executor=null,CancellationToken ct=default)=>Guard(async()=>{var(_,adapter)=await Checked(id,transport,connection,executor,ct);return await adapter.ReconcileAsync(id,ct);},ct);
+ IEffectAdapter FrozenAdapter(EffectIntent intent,HttpMessageHandler? transport,Func<DbConnection>? connection,IIsolatedDeploymentExecutor? executor)
+ {
+  if(intent.Scope.Kind=="github"){var g=JsonSerializer.Deserialize<GitHubEffect>(intent.Scope.ParametersJson)??throw new InvalidDataException("Frozen GitHub destination absent.");if(g.ApiOrigin+"/"+g.Owner+"/"+g.Repository!=intent.Scope.Destination)throw new InvalidDataException("Frozen destination changed.");return new GitHubEffects(Journal,new PersistedGitHubCredentials(),transport,[g.ApiOrigin]);}
+  if(intent.Scope.Kind=="postgresql"){
+   if(connection!=null)return new PostgreSqlEffects(Journal,connection);
+   var p=JsonSerializer.Deserialize<PostgreSqlMigration>(intent.Scope.ParametersJson);var ep=p?.Endpoint;
+   if(ep==null||!p!.SchemaRestrictedRole||ep.User!=p.Role||!Regex.IsMatch(ep.Host,"^[A-Za-z0-9.-]{1,100}$")||ep.Port is <1 or >65535||PostgreSqlProvider.EndpointIdentity(ep.Host,ep.Port,ep.Database)!=intent.Scope.Destination||!File.Exists(ep.TrustedRootCertificate)||StateStore.HashFile(ep.TrustedRootCertificate)!=ep.TrustedRootSha256)
+    return new PostgreSqlEffects(Journal,null,"Frozen PostgreSQL destination or trust unavailable; outcome unknown.");
+   return new PostgreSqlEffects(Journal,PgConnection(new(ep.Host,ep.Port,ep.Database,p.Schema,ep.User,ep.TrustedRootCertificate,true)));
+  }
+  if(intent.Scope.Kind=="deployment")return new DeploymentEffects(Journal,executor,new DeploymentReceiptProbe(new WindowsCredentialManagerProvider(),transport));
+  throw new InvalidDataException("Unknown frozen provider.");
+ }
+ public Task<EffectIntent> ReconcileExternalEffectAsync(string id,HttpMessageHandler? transport=null,Func<DbConnection>? connection=null,IIsolatedDeploymentExecutor? executor=null,CancellationToken ct=default)=>Guard(async()=>
+ {
+  var intent=Journal.Read(id)??throw new InvalidOperationException("Unknown effect intent.");
+  if(intent.State is not(ExternalEffectState.Unknown or ExternalEffectState.InFlight))return intent;
+  if(intent.Approval?.ScopeDigest!=intent.Scope.Digest){using var held=Journal.Lock(id);intent=intent with{State=ExternalEffectState.Unknown,Detail="Saved approval digest differs; outcome unknown.",UpdatedAt=DateTimeOffset.UtcNow};Journal.Save(intent);return intent;}
+  try{return await FrozenAdapter(intent,transport,connection,executor).ReconcileAsync(id,ct);}
+  catch(Exception e)when(e is not OperationCanceledException){using var held=Journal.Lock(id);intent=Journal.Read(id)!;intent=intent with{State=ExternalEffectState.Unknown,Detail="Frozen destination cannot be verified: "+e.GetType().Name,UpdatedAt=DateTimeOffset.UtcNow};Journal.Save(intent);return intent;}
+ },ct);
  public Task<EffectIntent> CancelExternalEffectAsync(string id,CancellationToken ct=default)=>Guard(async()=>{var(_,adapter)=await Checked(id,null,null,null,ct);return await adapter.CancelAsync(id,ct);},ct);
 }
 // Only persistent generic Windows credentials are eligible for an external operation.
@@ -150,5 +192,13 @@ internal sealed class PersistedGitHubCredentials : IScopedCredentialProvider
   finally{CredFree(ptr);}
  }
 }
+
+
+
+
+
+
+
+
 
 
