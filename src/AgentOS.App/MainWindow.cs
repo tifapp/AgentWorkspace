@@ -1,4 +1,4 @@
-﻿using AgentOS.Core;
+using AgentOS.Core;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
@@ -46,6 +46,7 @@ public sealed class MainWindow : Window
         var controls = new StackPanel{Orientation=Orientation.Horizontal,Spacing=6};
         controls.Children.Add(Action("Project",ShowSettings,"ProjectChooser"));
         controls.Children.Add(Action("Settings",ShowSettings,"Settings"));
+        controls.Children.Add(Action("Maps",ShowMaps,"TaskMaps"));
         decisions.Click += (_,_) => ShowDecisionMenu();
         AutomationProperties.SetAutomationId(decisions,"PendingDecisions"); controls.Children.Add(decisions);
         Grid.SetColumn(controls,1); header.Children.Add(controls); root.Children.Add(header);
@@ -119,6 +120,42 @@ public sealed class MainWindow : Window
         advanced.Children.Add(Action("Open project folder",()=>OpenPath(RequireRuntime().Snapshot.ProjectPath),"OpenProjectFolder"));
         body.Children.Add(new Expander{Header="Advanced: coverage, practice and concurrency",Content=advanced});
         var dialog=new ContentDialog{Title="Project settings",Content=new ScrollViewer{Content=body,MaxHeight=540,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled},CloseButtonText="Close",XamlRoot=root.XamlRoot};
+        await dialog.ShowAsync();
+    }
+    async Task ShowMaps()
+    {
+        var r=RequireRuntime();
+        var body=new StackPanel{Spacing=10};
+        body.Children.Add(Label("Draft task maps",18,true));
+        body.Children.Add(Label("Edit the JSON, save a draft, then select ready tasks to start. Saving never starts Codex.",12));
+        var editor=new TextBox{Header="Editable task map",AcceptsReturn=true,TextWrapping=TextWrapping.Wrap,MinHeight=220,MaxHeight=350};
+        AutomationProperties.SetAutomationId(editor,"TaskMapEditor"); body.Children.Add(editor);
+        var picker=new ComboBox{Header="Saved maps",MinWidth=260};
+        foreach(var saved in r.Snapshot.Maps)picker.Items.Add(new ComboBoxItem{Content=saved.Title+" · "+saved.Status,Tag=saved.Id});
+        picker.SelectionChanged+=(_,_)=>{if(picker.SelectedItem is ComboBoxItem item)editor.Text=JsonSerializer.Serialize(r.Snapshot.Maps.Single(m=>m.Id==(string)item.Tag),JsonFormat.Options);};
+        body.Children.Add(picker);
+        body.Children.Add(Row(Action("New draft from prompt",()=>
+        {
+            var value=prompt.Text.Trim();if(value.Length==0)throw new ArgumentException("Enter a prompt in the task editor first.");
+            var title=value.Length>70?value[..70]:value;
+            var draft=new AgentOS.Core.TaskMap{Title=title,Tasks=[new MapTask{Title=title,Prompt=value,Acceptance="Describe the verifiable result before starting."}]};
+            editor.Text=JsonSerializer.Serialize(draft,JsonFormat.Options);return Task.CompletedTask;
+        },"NewMapDraft"),Action("Save reviewed draft",()=>
+        {
+            var draft=JsonSerializer.Deserialize<AgentOS.Core.TaskMap>(editor.Text,JsonFormat.Options)??throw new ArgumentException("The draft is empty.");
+            var existing=r.Snapshot.Maps.SingleOrDefault(m=>m.Id==draft.Id);
+            var id=r.SaveDraftMap(draft,existing==null?null:draft.Revision);
+            editor.Text=JsonSerializer.Serialize(r.Snapshot.Maps.Single(m=>m.Id==id),JsonFormat.Options);
+            Notice("Draft saved","Select ready tasks and start them explicitly.");return Task.CompletedTask;
+        },"SaveMapDraft")));
+        body.Children.Add(Action("Start selected ready tasks",async()=>
+        {
+            var draft=JsonSerializer.Deserialize<AgentOS.Core.TaskMap>(editor.Text,JsonFormat.Options)??throw new ArgumentException("Choose a saved map first.");
+            var saved=r.Snapshot.Maps.SingleOrDefault(m=>m.Id==draft.Id)??throw new InvalidOperationException("Save the draft before starting.");
+            if(saved.Revision!=draft.Revision || JsonSerializer.Serialize(saved,JsonFormat.Options)!=JsonSerializer.Serialize(draft,JsonFormat.Options))throw new InvalidOperationException("Save or reload edited map details before starting.");
+            var launched=await r.StartSelectedMapTasksAsync(saved.Id);Notice("Tasks started",string.Join(", ",launched));
+        },"StartMapTasks"));
+        var dialog=new ContentDialog{Title="Task maps",Content=new ScrollViewer{Content=body,MaxHeight=560},CloseButtonText="Close",XamlRoot=root.XamlRoot};
         await dialog.ShowAsync();
     }
     async Task Browse()
@@ -280,6 +317,7 @@ public sealed class MainWindow : Window
     static Border Card(string title,UIElement content)
     {var stack=new StackPanel{Spacing=5};stack.Children.Add(Label(title,13,true));stack.Children.Add(content);return new Border{Child=stack,Padding=new Thickness(10),CornerRadius=new CornerRadius(6),BorderThickness=new Thickness(1),Background=Application.Current.Resources["CardBackgroundFillColorDefaultBrush"] as Brush,BorderBrush=Application.Current.Resources["CardStrokeColorDefaultBrush"] as Brush};}
 }
+
 
 
 

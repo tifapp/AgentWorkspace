@@ -51,6 +51,53 @@ static WorkUnit Work(ProjectRuntime runtime, string id) => runtime.Snapshot.Work
 const string ChangeRetries = "Set-Content settings.json '{\"retries\":2,\"cancellation\":false}'; git diff";
 const string ChangeCancel = "Set-Content settings.json '{\"retries\":1,\"cancellation\":true}'; git diff";
 
+await Test("Task maps remain drafts until selected dependencies are ready", async () =>
+{
+    await using var r = await NewRuntime(); r.Configure("Write-Output passed");
+    var first = new MapTask { Title = "First", Prompt = "Add-Content README.md 'First map step'", Acceptance = "README contains first step", Selected = true };
+    var second = new MapTask { Title = "Second", Prompt = "Add-Content README.md 'Second map step'", Acceptance = "README contains both steps", Selected = true };
+    var map = new AgentOS.Core.TaskMap { Title = "Ordered work", Tasks = [first, second], Edges = [new MapEdge(first.Id, second.Id, MapEdgeKind.Dependency)] };
+    var id = r.SaveDraftMap(map);
+    Assert(r.Snapshot.Work.Count == 0 && r.Snapshot.Maps.Single().Status == MapStatus.Draft, "Saving a draft started execution.");
+    var launched = await r.StartSelectedMapTasksAsync(id); await r.WaitForIdleAsync();
+    Assert(launched.Count == 1 && r.Snapshot.Maps.Single().Tasks[1].WorkId == null, "Dependency was bypassed.");
+    var next = await r.StartSelectedMapTasksAsync(id); await r.WaitForIdleAsync();
+    Assert(next.Count == 1 && next[0] != launched[0], "Completed dependency did not unlock the next task.");
+    var revised = r.Snapshot.Maps.Single(); revised.Edges.Add(new MapEdge(second.Id, first.Id, MapEdgeKind.Dependency));
+    var refused = false; try { TaskMapRules.Validate(revised); } catch (ArgumentException) { refused = true; }
+    Assert(refused, "A dependency cycle was accepted.");
+});
+await Test("Old state keeps history and captured citations cannot be rewritten", async () =>
+{
+    var legacy = JsonSerializer.Serialize(new { Schema = 1, ProjectPath = @"C:\old", Work = new[] { new WorkUnit { Task = "legacy task" } } }, JsonFormat.Options);
+    var store = new StateStore(Path.Combine(root, "map-migration-" + Guid.NewGuid().ToString("N")));
+    File.WriteAllText(store.StatePath, legacy);
+    var migrated = store.Read()!;
+    Assert(migrated.Schema == 2 && migrated.Maps.Count == 0 && migrated.Work.Single().Task == "legacy task", "Schema-1 history was lost.");
+    Assert(File.ReadAllText(store.StatePath + ".schema1.bak") == legacy, "Migration backup differs from old history.");
+    store.Save(migrated); Assert(store.Read()!.Work.Single().Task == "legacy task", "Saved migration lost history.");
+    await using var r = await NewRuntime();
+    var citation = ContextCitation.Create("foreground-title", System.Text.Encoding.UTF8.GetBytes("example"));
+    var map = new AgentOS.Core.TaskMap { Title = "Captured context", Tasks = [new MapTask { Title = "Inspect", Prompt = "Write-Output inspect", Acceptance = "Inspection recorded" }], Citations = [citation] };
+    var id = r.SaveDraftMap(map); var edited = r.Snapshot.Maps.Single(m => m.Id == id);
+    edited.Citations[0] = edited.Citations[0] with { Sha256 = new string('0', 64) };
+    var rejected = false; try { r.SaveDraftMap(edited, edited.Revision); } catch (InvalidOperationException) { rejected = true; }
+    Assert(rejected, "Captured citation rewrite was accepted.");
+});
+await Test("CLI broker uses the open project authority for maps", async () =>
+{
+    await using var r = await NewRuntime(); r.Configure("Write-Output passed");
+    var path = r.Snapshot.ProjectPath;
+    var task = new MapTask { Title = "Inspect", Prompt = "Write-Output inspect", Acceptance = "Inspection recorded", Selected = true };
+    var draft = new AgentOS.Core.TaskMap { Title = "Broker draft", Tasks = [task] };
+    var saved = await ProjectClient.SaveMapAsync(path, draft, null);
+    Assert(saved?.Id == draft.Id && r.Snapshot.Work.Count == 0, "Broker save did not preserve draft-only behavior.");
+    var listed = await ProjectClient.MapsAsync(path);
+    Assert(listed?.Single().Id == draft.Id, "Broker list missed the saved map.");
+    var started = await ProjectClient.StartMapAsync(path, draft.Id);
+    Assert(started?.Count == 1, "Broker failed to start selected task.");
+    await r.WaitForIdleAsync();
+});
 await Test("Private source, Git indexes, and ordinary shell are separate", async () =>
 {
     await using var r = await NewRuntime(); r.Configure("Write-Output passed");
@@ -567,3 +614,5 @@ internal sealed class RepeatedContentionHost(string project) : IWorkHost
         return new(0, true, null);
     }
 }
+
+

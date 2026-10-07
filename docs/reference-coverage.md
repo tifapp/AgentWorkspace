@@ -118,3 +118,7 @@ The **Task Map States (1).html** images were extracted and inspected locally. Th
 | Long detail and collapsed results | Scrollable detail, expandable full prompt/report/diff; responsive controls at 1280?900 and 900?760. |
 
 Full canvas dragging, live steering, clarification replies, arbitrary task linking, citing by drag-and-drop, capture hotkeys, phone delivery, suggested opportunity intake and required-follow-up aggregation are not implemented. They cannot be inferred from revision nesting.
+
+## Approved platform boundary (2026-10-07)
+
+This program is Windows/Codex only. Phone work is deferred and explicitly excluded: no mobile app, relay, pairing, phone notifications, or phone control is implemented or approved for this release. Future phone work needs a separate decision and acceptance evidence.

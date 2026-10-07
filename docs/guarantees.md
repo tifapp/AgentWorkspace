@@ -32,7 +32,7 @@ Parking is an asynchronous wait at a managed effect boundary. Independent work u
 
 ## Recovery
 
-Project state is durable schema-1 JSON, written with atomic replacement and a flush. Malformed state and machine journals fail closed. An exclusive .git/agent-os.runtime.lock handle owns each project; the surviving filename does not indicate a live owner. Ownership is not reclaimed just because a clock deadline passed.
+The previously validated release stores durable schema-1 JSON, written with atomic replacement and a flush. Malformed state and machine journals fail closed. An exclusive .git/agent-os.runtime.lock handle owns each project; the surviving filename does not indicate a live owner. Ownership is not reclaimed just because a clock deadline passed.
 
 On restart, saved publication intent is reconciled against Git. A matching commit or tag is recovered as completed without repeating it. An interrupted host without a confirmed effect is unknown. Private output stays available. Cleanup targets only owned clones and does not follow reparse points. Old sandbox profiles and temporary credential copies have owner records and are recovered after owner death; an inaccessible owner is not assumed dead. Private files may retain an obsolete sandbox SID until cleanup.
 
@@ -45,3 +45,9 @@ Evidence also records the actual Codex model, runtime assembly SHA-256 and the e
 The retirement installer requires matching successful desktop, regression and comparison evidence. It refuses other stored legacy tasks, including expired records, drains the installation task, holds the legacy registry lock, freezes old clients with an unsupported schema, archives the skill and replaces global instructions. No live legacy entry is erased to proceed. If host permissions forbid moving the installed directory, it preserves those permissions and archives a copy; the original remains discoverable but its execution is disabled by policy and registry schema. The archive and receipt provide a reversible migration record.
 
 Replacement applies to the supported managed surfaces above. It does not turn unsupported external operations into protected work. See [retirement evidence](retirement.md) and [the product objective](product-objective.md).
+
+## Approved platform boundary (2026-10-07)
+
+This program is Windows/Codex only. Phone work is deferred and explicitly excluded: no mobile app, relay, pairing, phone notifications, or phone control is implemented or approved for this release. Future phone work needs a separate decision and acceptance evidence.
+
+The current uncompiled source adds schema-1-to-2 migration with a retained .schema1.bak copy before writing schema 2. It is not covered by the earlier release evidence.

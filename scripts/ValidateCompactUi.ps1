@@ -1,4 +1,4 @@
-﻿param()
+param()
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $paths = @{
@@ -34,3 +34,25 @@ Require $row 'reportExpander' 'expandable result'
 Require $row 'ClearReply\(' 'successful follow-up draft clearing'
 Write-Output 'Compact UI structural checks passed. This does not build or render the app.'
 
+$maps = Get-Content -LiteralPath (Join-Path $repo 'src/AgentOS.Core/TaskMaps.cs') -Raw
+$models = Get-Content -LiteralPath (Join-Path $repo 'src/AgentOS.Core/Models.cs') -Raw
+$storage = Get-Content -LiteralPath (Join-Path $repo 'src/AgentOS.Core/Storage.cs') -Raw
+$tests = Get-Content -LiteralPath (Join-Path $repo 'tests/AgentOS.Tests/Program.cs') -Raw
+$cli = Get-Content -LiteralPath (Join-Path $repo 'src/AgentOS.Cli/Program.cs') -Raw
+Require $main 'Action\("Maps",ShowMaps,"TaskMaps"\)' 'task-map entry in compact UI'
+Require $main 'SaveMapDraft|Save reviewed draft' 'reviewed draft save'
+Require $main 'StartSelectedMapTasksAsync' 'explicit map start control'
+Require $models 'List<TaskMap> Maps' 'durable maps'
+Require $storage 'schema1\.bak' 'schema-1 migration backup'
+Require $maps 'Task dependency cycle' 'dependency cycle refusal'
+Require $maps 'Selected && t.WorkId == null && TaskMapRules.DependenciesComplete' 'selected dependency admission'
+Require $maps 'Captured citations cannot be replaced' 'citation immutability'
+Require $cli 'case "map-save"' 'CLI map submission'
+Require $tests 'Task maps remain drafts until selected dependencies are ready' 'map admission test'
+Require $tests 'Old state keeps history and captured citations cannot be rewritten' 'migration and citation test'
+Require $tests 'CLI broker uses the open project authority for maps' 'shared authority map test'
+Require (Get-Content -LiteralPath (Join-Path $repo 'src/AgentOS.Core/ProjectBroker.cs') -Raw) 'case "map-start"' 'shared authority map start'
+foreach($relative in @('docs/product-objective.md','docs/implementation-plan.md','docs/reference-coverage.md','docs/guarantees.md','knowledge/decisions.md')) {
+ Require (Get-Content -LiteralPath (Join-Path $repo $relative) -Raw) 'Phone work is deferred and explicitly excluded' "$relative phone exclusion"
+}
+Write-Output 'Draft-map and phone-boundary structural checks passed. Native compilation and execution remain unverified.'

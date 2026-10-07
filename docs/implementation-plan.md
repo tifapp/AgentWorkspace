@@ -23,3 +23,7 @@ The project must outperform and supersede the resource-checkin skill so ordinary
 - [Codex non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode): JSON events, workspace-write, CLI authentication and task execution. The installed CLI's `exec --help` was also checked.
 - [Windows Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects): normal child inheritance, lifecycle termination and the WMI limitation.
 - [Git update-ref](https://git-scm.com/docs/git-update-ref): expected-old ref publication.
+
+## Approved platform boundary (2026-10-07)
+
+This program is Windows/Codex only. Phone work is deferred and explicitly excluded: no mobile app, relay, pairing, phone notifications, or phone control is implemented or approved for this release. Future phone work needs a separate decision and acceptance evidence.

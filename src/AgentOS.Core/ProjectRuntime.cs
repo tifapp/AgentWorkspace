@@ -2,7 +2,7 @@ using System.Collections.Concurrent;
 
 namespace AgentOS.Core;
 
-public sealed class ProjectRuntime : IAsyncDisposable
+public sealed partial class ProjectRuntime : IAsyncDisposable
 {
     public const string IntegratedRef = "refs/heads/agent-os/integrated";
     private readonly object _sync = new();
@@ -91,6 +91,7 @@ public sealed class ProjectRuntime : IAsyncDisposable
             else { decision.Status = DecisionStatus.Unknown; decision.Note = "The saved release intent has no confirmed matching tag. Inspect Git; automatic replay is disabled."; }
         }
         _state.IntegratedCommit = current;
+        UpdateMapStatuses();
         Save();
     }
 
@@ -421,7 +422,7 @@ public sealed class ProjectRuntime : IAsyncDisposable
     }
     private string LogPath(WorkUnit work, string name) { var path = Path.Combine(_store.Root, "evidence", work.Id); Directory.CreateDirectory(path); return Path.Combine(path, name); }
     private WorkUnit Find(string id) { lock (_sync) return _state.Work.Single(x => x.Id == id); }
-    private void Set(WorkUnit work, WorkStatus status, string detail) => Mutate(() => { work.Status = status; work.Detail = detail; work.UpdatedAt = DateTimeOffset.UtcNow; Event(work.Id, status.ToString(), detail); });
+    private void Set(WorkUnit work, WorkStatus status, string detail) => Mutate(() => { work.Status = status; work.Detail = detail; work.UpdatedAt = DateTimeOffset.UtcNow; UpdateMapStatuses(); Event(work.Id, status.ToString(), detail); });
     private void Event(string? id, string kind, string message)
     { _state.Events.Add(new(DateTimeOffset.UtcNow, id, kind, message)); if (_state.Events.Count > 1000) _state.Events.RemoveRange(0, _state.Events.Count - 1000); }
     private void Save() => _store.Save(_state);
@@ -437,3 +438,6 @@ public sealed class ProjectRuntime : IAsyncDisposable
         _lifetime.Dispose(); _projectLock.Dispose(); _publication.Dispose();
     }
 }
+
+
+

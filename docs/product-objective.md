@@ -66,3 +66,7 @@ Use the supplied North Star, edge-case catalogue and task-map states to extend t
 The final runtime passed 34 integration checks and a real desktop workflow with conflicting and independent Codex tasks. Managed tools derive resource identities and require no check-in, renew, declaration or checkout. A matched 11-repetition coordination benchmark measured median admission/effect/release at 136.47 ms versus 222.09 ms for the legacy automated wrapper and 312.54 ms for manual registry commands. This establishes this workload's coordination overhead; whole-task throughput, model tokens and general performance superiority remain unmeasured.
 
 Use agent-os for the supported managed scope. Native arbitrary SDKs, unmanaged writers, other Windows accounts and external services remain unsupported. The old unconstrained script-host escape test is retained as a negative control; it is not a selectable product host. See [current guarantees](guarantees.md), [retirement receipt and limitations](retirement.md) and [executed validation](validation-report.md).
+
+## Approved platform boundary (2026-10-07)
+
+This program is Windows/Codex only. Phone work is deferred and explicitly excluded: no mobile app, relay, pairing, phone notifications, or phone control is implemented or approved for this release. Future phone work needs a separate decision and acceptance evidence.

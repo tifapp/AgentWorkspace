@@ -8,7 +8,7 @@ public enum DecisionStatus { Pending, Approved, Rejected, Completed, Stale, Unkn
 
 public sealed class ProjectState
 {
-    public int Schema { get; set; } = 1;
+    public int Schema { get; set; } = 2;
     public long Generation { get; set; }
     public string ProjectPath { get; set; } = "";
     public string ProjectName => Path.GetFileName(ProjectPath);
@@ -16,6 +16,7 @@ public sealed class ProjectState
     public string ValidationCommand { get; set; } = "";
     public string CodexPath { get; set; } = "";
     public List<WorkUnit> Work { get; set; } = [];
+    public List<TaskMap> Maps { get; set; } = [];
     public List<HumanDecision> Decisions { get; set; } = [];
     public List<EffectEvent> Events { get; set; } = [];
 }
@@ -96,3 +97,4 @@ public static class JsonFormat
     };
     public static T Copy<T>(T value) => JsonSerializer.Deserialize<T>(JsonSerializer.Serialize(value, Options), Options)!;
 }
+

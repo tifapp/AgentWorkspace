@@ -56,3 +56,7 @@ Builds require network access to Microsoft's .NET and NuGet feeds. `global.json`
 | `scripts` | Build, bootstrap, source hashing and desktop UI automation |
 
 The repository began as a README only. This is a new Windows runtime; it does not claim compatibility with the macOS daemon or its schema-14 registry. The supplied North Star, Rebuild Guide, Workflow Edge Cases and Task Map States informed the implementation. See [reference cases and UI mapping](docs/reference-coverage.md) and the [implementation plan](docs/implementation-plan.md).
+
+## Current source revision
+
+Draft task-map source and a compact Maps review dialog have been added since the last compiled release. See [integration status](docs/integration-status.md) before relying on this source. Phone work is deferred.

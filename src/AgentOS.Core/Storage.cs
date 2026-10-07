@@ -14,7 +14,20 @@ internal sealed class StateStore
         if (!File.Exists(StatePath)) return null;
         var state = JsonSerializer.Deserialize<ProjectState>(File.ReadAllText(StatePath), JsonFormat.Options)
                     ?? throw new InvalidDataException("The saved project state is empty. Restore a known backup; it was not reset.");
-        if (state.Schema != 1) throw new InvalidDataException($"Unsupported project state version {state.Schema}. No state was changed.");
+        if (state.Schema is not (1 or 2)) throw new InvalidDataException($"Unsupported project state version {state.Schema}. No state was changed.");
+        if (state.Schema == 1)
+        {
+            var backup = StatePath + ".schema1.bak";
+            if (!File.Exists(backup)) File.Copy(StatePath, backup, false);
+            state.Maps ??= []; state.Schema = 2;
+        }
+        if (state.Maps == null) throw new InvalidDataException("Task maps are malformed; state was not changed.");
+        try
+        {
+            foreach (var map in state.Maps) TaskMapRules.Validate(map);
+            if (state.Maps.Select(m => m.Id).Distinct(StringComparer.Ordinal).Count() != state.Maps.Count) throw new ArgumentException("Duplicate map identity.");
+        }
+        catch (Exception e) when (e is ArgumentException or NullReferenceException) { throw new InvalidDataException("Saved task maps are invalid; state was not changed.", e); }
         return state;
     }
     public void Save(ProjectState state)
@@ -67,3 +80,4 @@ internal static class SafePaths
         dir.Delete();
     }
 }
+

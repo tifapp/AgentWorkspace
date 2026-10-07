@@ -87,3 +87,7 @@ This does **not** establish a complete reference monitor. A test explicitly prov
 Parking applies to candidate publication; there is no native Codex tool-call suspension/wakeup scheduler. The authority example is a real local release tag, not a remote deployment. See `docs/guarantees.md` for the supported surfaces, read consistency, recovery rules and unsupported configurations.
 
 No clean Windows VM, Windows 11, ARM64, signed installer, Store distribution or hostile-host confinement test was available in this run. The portable app was launched and exercised on the stated Windows machine. These are explicit validation limits, not passing guarantees.
+
+## Unverified source changes after the retirement release
+
+Draft task-map source, CLI/UI review controls, integration tests, and extended structural checks were added after the binary evidence above. The delegated command sandbox has no usable .NET SDK and native execution is unavailable. Only structural source checks ran for this revision; see [integration status](integration-status.md).

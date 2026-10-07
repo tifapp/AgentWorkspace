@@ -7,3 +7,7 @@
 - Final retirement status is determined by artifacts/retirement/retirement-receipt.json and installed global instructions, not a design document.
 
 Checked 2026-10-07 at 68c92e8+dirty. Recheck after runtime, host, platform or migration changes.
+
+## Current integration work
+
+The approved Windows/Codex program remains incomplete. The draft-map source requires native compile and integration validation. Foreground capture, isolated context microagent, real canvas, steering/wait delivery, external adapters, VM profile, notifications, tray, and signed updater remain open. Phone work is explicitly deferred.
