@@ -13,6 +13,7 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _tokens = new();
     private readonly ConcurrentDictionary<string, Task> _jobs = new();
     private readonly IWorkHost _host;
+    private readonly TaskInteractionStore _interactions;
     private ProjectState _state;
     private bool _disposed;
     private ProjectBroker? _broker;
@@ -23,7 +24,7 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
     public static string Coverage => "Codex CLI 0.160.0 is the only supported host. Coordination is automatic. PowerShell edits and validation run in private Windows AppContainers with no network capabilities; native Codex tools are read-only. Private Git status, diff, add, commit and log use a scoped runtime adapter. The runtime rechecks and validates publication into agent-os/integrated, records evidence in its shared SQLite ledger, and owns loopback previews and process trees. Your checked-out branch is separate. External services, deployment, arbitrary native SDKs, network projects, aliases, links and unmanaged programs are not supported mediation surfaces. Unsupported operations do not receive a broader-permission fallback.";
 
     private ProjectRuntime(StateStore store, FileStream projectLock, ProjectState state, IWorkHost host)
-    { _store = store; _projectLock = projectLock; _state = state; _host = host; }
+    { _store = store; _projectLock = projectLock; _state = state; _host = host; _interactions = new TaskInteractionStore(store.Root); if (host is ManagedCodexHost managed) { managed.Interactions = _interactions; managed.Runtime = this; } }
 
     public static Task<ProjectRuntime> OpenAsync(string project, string? dataRoot = null) => OpenInternal(project, dataRoot, new ManagedCodexHost());
     internal static async Task<ProjectRuntime> OpenInternal(string project, string? dataRoot, IWorkHost host)
@@ -55,6 +56,7 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
             if (!string.Equals(state.ProjectPath, project, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Saved project identity does not match this folder.");
             var runtime = new ProjectRuntime(store, projectLock, state, host);
             await runtime.Recover();
+            runtime._interactions.Recover(id => false);
             ProjectLocations.Remember(project, dataRoot);
             runtime._broker = new ProjectBroker(runtime);
             return runtime;
@@ -445,6 +447,7 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
     private void Set(WorkUnit work, WorkStatus status, string detail)
     {
         Mutate(() => { work.Status = status; work.Detail = detail; work.UpdatedAt = DateTimeOffset.UtcNow; UpdateMapStatuses(); Event(work.Id, status.ToString(), detail); });
+        if (!work.IsActive) OnInteractionOwnerEnded(work.Id);
         if (status == WorkStatus.Completed) ScheduleSelectedMapTasks();
     }
     private void Event(string? id, string kind, string message)
@@ -462,6 +465,3 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
         _lifetime.Dispose(); _projectLock.Dispose(); _publication.Dispose();
     }
 }
-
-
-

@@ -8,6 +8,9 @@ namespace AgentOS.Core;
 // Codex is the reasoning host. Its only delegated mutation tool executes in an AppContainer.
 internal sealed class ManagedCodexHost : IWorkHost
 {
+    internal TaskInteractionStore? Interactions { get; set; }
+    internal ProjectRuntime? Runtime { get; set; }
+    internal static object SteeringParameters(string threadId, string turnId, string text) => new { threadId, expectedTurnId = turnId, input = new[] { new { type = "text", text } } };
     public async Task<string> Version(string executable)
     {
         var version = await new CodexHost().Version(executable);
@@ -50,7 +53,7 @@ internal sealed class ManagedCodexHost : IWorkHost
         }
         var finished = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        string? thread = null, report = null, model = null;
+        string? thread = null, report = null, model = null, activeTurn = null;
         var tools = new ConcurrentDictionary<int, Task>();
         OwnedPreview? preview = null;
         async Task Tool(JsonElement root)
@@ -62,7 +65,52 @@ internal sealed class ManagedCodexHost : IWorkHost
             string result; bool success;
             try
             {
-                if (name == "agent_os_preview")
+                if (name == "agent_os_clarify")
+                {
+                    var arguments = p.GetProperty("arguments");
+                    if (string.IsNullOrWhiteSpace(arguments.GetProperty("question").GetString()) || string.IsNullOrWhiteSpace(arguments.GetProperty("scope").GetString())) throw new ArgumentException("Clarification question and scope are required.");
+                    var item = Interactions!.Add(new TaskInteraction { WorkId = work.Id, Kind = InteractionKind.Clarification, Status = InteractionStatus.Pending, Text = arguments.GetProperty("question").GetString() ?? "", Scope = arguments.GetProperty("scope").GetString(), TurnId = activeTurn, Deadline = arguments.TryGetProperty("deadline", out var deadline) && deadline.ValueKind == JsonValueKind.String ? DateTimeOffset.Parse(deadline.GetString()!) : null });
+                    output("Clarification " + item.Id + ": " + item.Text);
+                    using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+                    if (item.Deadline != null) limit.CancelAfter(item.Deadline.Value <= DateTimeOffset.UtcNow ? TimeSpan.Zero : item.Deadline.Value - DateTimeOffset.UtcNow);
+                    var answer = await Interactions.AwaitReplyAsync(item.Id, limit.Token);
+                    result = answer.Status == InteractionStatus.Replied ? answer.Response! : answer.Status + ": " + answer.Response; success = answer.Status == InteractionStatus.Replied;
+                }
+                else if (name == "agent_os_followup")
+                {
+                    var arguments = p.GetProperty("arguments");
+                    var required = arguments.GetProperty("required").GetBoolean(); var task = arguments.GetProperty("task").GetString() ?? "";
+                    if (string.IsNullOrWhiteSpace(task)) throw new ArgumentException("Followup task is required.");
+                    var obligation = required ? Interactions!.Add(new TaskInteraction { WorkId = work.Id, Kind = InteractionKind.Obligation, Status = InteractionStatus.Pending, Required = true, Text = task }) : null;
+                    var item = Interactions!.Add(new TaskInteraction { WorkId = work.Id, Kind = InteractionKind.Followup, Status = InteractionStatus.Pending, Required = required, Text = task, RelatedId = obligation?.Id });
+                    result = "Recorded followup " + item.Id + (obligation == null ? "" : " with required obligation " + obligation.Id) + ". Explicit acceptance is required to start another task."; success = true;
+                }
+                else if (name == "agent_os_peer")
+                {
+                    var arguments = p.GetProperty("arguments"); var item = Runtime!.AskPeer(work.Id, arguments.GetProperty("targetWorkId").GetString()!, arguments.GetProperty("question").GetString()!, arguments.TryGetProperty("deadline", out var peerDeadline) && peerDeadline.ValueKind == JsonValueKind.String ? DateTimeOffset.Parse(peerDeadline.GetString()!) : null);
+                    result = "Peer request " + item.Id + " is pending acknowledgement."; success = true;
+                }
+                else if (name == "agent_os_ack_peer")
+                {
+                    var arguments = p.GetProperty("arguments"); var item = Runtime!.AcknowledgePeer(work.Id, arguments.GetProperty("requestId").GetString()!, arguments.GetProperty("response").GetString()!);
+                    result = "Acknowledged peer request " + item.Id; success = true;
+                }
+                else if (name == "agent_os_handoff_peer")
+                {
+                    var arguments = p.GetProperty("arguments"); var item = Runtime!.HandoffPeer(work.Id, arguments.GetProperty("requestId").GetString()!, arguments.GetProperty("targetWorkId").GetString()!);
+                    result = "Handed peer request " + item.Id + " to " + item.TargetWorkId; success = true;
+                }
+                else if (name == "agent_os_wait")
+                {
+                    var arguments = p.GetProperty("arguments"); var kind = Enum.Parse<WaitKind>(arguments.GetProperty("kind").GetString()!, true);
+                    var item = Runtime!.CreateWait(work.Id, kind, arguments.GetProperty("targetId").GetString()!);
+                    var settled = await Runtime.AwaitWaitAsync(work.Id, item.Id, cancel); result = settled.Status + ": " + settled.Response; success = settled.Status == InteractionStatus.Resolved;
+                }
+                else if (name == "agent_os_cancel_wait")
+                {
+                    var item = Runtime!.CancelWait(work.Id, p.GetProperty("arguments").GetProperty("waitId").GetString()!); result = "Canceled wait " + item.Id; success = true;
+                }
+                else if (name == "agent_os_preview")
                 {
                     using var ownership = await new MachineCoordinator().EnterAsync("private:" + work.Workspace, work.ShortTask, output, cancel);
                     if (preview != null) await preview.DisposeAsync();
@@ -141,17 +189,42 @@ internal sealed class ManagedCodexHost : IWorkHost
                 developerInstructions = "You are authorized to MODIFY the delegated project through agent_os_shell and agent_os_git. The native Codex sandbox is read-only intentionally: it protects the host configuration, NOT the separately delegated project. Your managed tools execute in another, writable private project workspace. Do not refuse an authorized project edit because native tools are read-only. Use agent_os_shell for file edits, shell and PowerShell tests. Use agent_os_git for Git status/diff/add/commit/log. Native Git is incompatible with AppContainer on this Windows version and is blocked. Relative paths work with PowerShell providers; .NET APIs require [Environment]::CurrentDirectory, not the virtual Work: drive. Every managed command has no network access and cannot write outside its private workspace. Native execution tools are disabled. Coordination is automatic; do not maintain registry entries. Read current files before editing; complete the task. Runtime validates and integrates after you finish.",
                 dynamicTools = new object[] { new { type = "function", name = "agent_os_shell", description = "Execute ordinary PowerShell files, shell and PowerShell tests in the private Windows workspace. No network or outside writes. Children end with this command. Maximum duration 120 seconds. For Git use agent_os_git.", inputSchema = new { type = "object", properties = new { script = new { type = "string" } }, required = new[] { "script" }, additionalProperties = false } },
                     new { type = "function", name = "agent_os_git", description = "Ordinary private Git status, diff, add all changes, commit with message, or log. Remote operations and configuration changes are not delegated.", inputSchema = new { type = "object", properties = new { operation = new { type = "string", @enum = new[] { "status", "diff", "add", "commit", "log" } }, message = new { type = "string" } }, required = new[] { "operation" }, additionalProperties = false } },
+                    new { type = "function", name = "agent_os_clarify", description = "Ask the current user a scoped clarification and await the exact response. Other tasks continue independently.", inputSchema = new { type = "object", properties = new { question = new { type = "string" }, scope = new { type = "string" }, deadline = new { type = "string" } }, required = new[] { "question", "scope" }, additionalProperties = false } },
+                    new { type = "function", name = "agent_os_followup", description = "Record a proposed followup. It is never started automatically; required obligations remain after this turn.", inputSchema = new { type = "object", properties = new { task = new { type = "string" }, required = new { type = "boolean" } }, required = new[] { "task", "required" }, additionalProperties = false } },
+                    new { type = "function", name = "agent_os_peer", description = "Ask another active task for a peer acknowledgement; this records a durable request.", inputSchema = new { type = "object", properties = new { targetWorkId = new { type = "string" }, question = new { type = "string" }, deadline = new { type = "string" } }, required = new[] { "targetWorkId", "question" }, additionalProperties = false } },
+                    new { type = "function", name = "agent_os_ack_peer", description = "Acknowledge a peer request assigned to this task with an exact response.", inputSchema = new { type = "object", properties = new { requestId = new { type = "string" }, response = new { type = "string" } }, required = new[] { "requestId", "response" }, additionalProperties = false } },
+                    new { type = "function", name = "agent_os_handoff_peer", description = "Hand a pending peer request assigned to this task to another active task.", inputSchema = new { type = "object", properties = new { requestId = new { type = "string" }, targetWorkId = new { type = "string" } }, required = new[] { "requestId", "targetWorkId" }, additionalProperties = false } },
+                    new { type = "function", name = "agent_os_wait", description = "Wait for a task, message, decision, or resource condition. The wait is durable, cancelable, and rejects dependency cycles.", inputSchema = new { type = "object", properties = new { kind = new { type = "string", @enum = new[] { "Task", "Message", "Decision", "Resource" } }, targetId = new { type = "string" } }, required = new[] { "kind", "targetId" }, additionalProperties = false } },
+                    new { type = "function", name = "agent_os_cancel_wait", description = "Cancel a pending wait owned by this task.", inputSchema = new { type = "object", properties = new { waitId = new { type = "string" } }, required = new[] { "waitId" }, additionalProperties = false } },
                     new { type = "function", name = "agent_os_preview", description = "Start a task-owned loopback preview of a fixed private source snapshot. If the preferred port is occupied, choose an available port. Dot files and oversized files are excluded; source is served as plain text. Closes on completion or cancellation.", inputSchema = new { type = "object", properties = new { preferredPort = new { type = "integer", minimum = 0, maximum = 65535 } }, required = new[] { "preferredPort" }, additionalProperties = false } } } });
             thread = started.GetProperty("thread").GetProperty("id").GetString();
             if (started.TryGetProperty("model", out var actualModel)) model = actualModel.GetString();
-            await Request("turn/start", new { threadId = thread, input = new[] { new { type = "text", text = work.Task } } });
+            var turn = await Request("turn/start", new { threadId = thread, input = new[] { new { type = "text", text = work.Task } } });
+            activeTurn = turn.GetProperty("turn").GetProperty("id").GetString();
+            var steering = Task.Run(async () =>
+            {
+                while (!finished.Task.IsCompleted && !cancel.IsCancellationRequested)
+                {
+                    foreach (var item in Interactions?.Inspect(work.Id).Where(x => x.Kind == InteractionKind.Steering && x.Status == InteractionStatus.Queued) ?? [])
+                    {
+                        try { await Request("turn/steer", SteeringParameters(thread!, activeTurn!, item.Text)); Interactions!.Change(item.Id, InteractionStatus.Delivered, turnId: activeTurn); }
+                        catch (Exception e) { try { Interactions!.Change(item.Id, InteractionStatus.Rejected, e.Message); } catch (InvalidOperationException) { } }
+                    }
+                    await Task.Delay(150, cancel);
+                }
+            }, CancellationToken.None);
             var ok = await finished.Task.WaitAsync(cancel);
+            try { await steering; } catch (OperationCanceledException) { }
+            foreach (var item in Interactions?.Inspect(work.Id).Where(x => x.Kind == InteractionKind.Steering && x.Status == InteractionStatus.Queued) ?? []) Interactions!.Change(item.Id, InteractionStatus.Rejected, "The turn ended before delivery.");
             await Task.WhenAll(tools.Values);
             return new(ok ? 0 : 1, ok, thread, report, model);
         }
         finally
         {
-            job.Stop(); try { await Task.WhenAll(reader, errors).WaitAsync(TimeSpan.FromSeconds(10)); } catch { }
+            job.Stop();
+            foreach (var item in Interactions?.Inspect(work.Id).Where(x => x.Kind == InteractionKind.Steering && x.Status == InteractionStatus.Queued) ?? [])
+                try { Interactions!.Change(item.Id, InteractionStatus.Rejected, "The host stopped before delivery; no turn was replayed."); } catch (InvalidOperationException) { }
+            try { await Task.WhenAll(reader, errors).WaitAsync(TimeSpan.FromSeconds(10)); } catch { }
             if (preview != null) { await preview.DisposeAsync(); output("The task-owned preview has closed."); }
             // Auth is never retained as task evidence.
             var copiedAuth = Path.Combine(home, "auth.json"); if (File.Exists(copiedAuth)) File.Delete(copiedAuth);

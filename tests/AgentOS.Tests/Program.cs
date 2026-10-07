@@ -48,6 +48,66 @@ static async Task Eventually(Func<bool> condition, int seconds = 30)
 async Task<ProjectRuntime> NewRuntime()
 { var project = await PracticeProject.CreateAsync(root); return await ProjectRuntime.OpenInternal(project, Path.Combine(root, "state"), new ScriptHost()); }
 static WorkUnit Work(ProjectRuntime runtime, string id) => runtime.Snapshot.Work.Single(w => w.Id == id);
+await Test("Steering request binds delivery to the active turn", async () =>
+{
+    var wire = JsonSerializer.Serialize(ManagedCodexHost.SteeringParameters("thread-1", "turn-7", "revise"));
+    using var document = JsonDocument.Parse(wire);
+    Assert(document.RootElement.GetProperty("expectedTurnId").GetString() == "turn-7", "Steering did not pin the active turn.");
+    Assert(document.RootElement.GetProperty("threadId").GetString() == "thread-1", "Steering lost thread identity.");
+    await Task.CompletedTask;
+});
+await Test("Interaction journal survives restart and does not replay steering", async () =>
+{
+    var folder = Path.Combine(root, "interaction-journal"); Directory.CreateDirectory(folder);
+    var store = new TaskInteractionStore(folder);
+    var message = store.Add(new TaskInteraction { WorkId = "dead", Kind = InteractionKind.Steering, Status = InteractionStatus.Queued, Text = "change course" });
+    var reply = store.Add(new TaskInteraction { WorkId = "dead", Kind = InteractionKind.Clarification, Status = InteractionStatus.Pending, Scope = "file", Text = "Which file?" });
+    var obligation = store.Add(new TaskInteraction { WorkId = "dead", Kind = InteractionKind.Obligation, Status = InteractionStatus.Pending, Required = true, Text = "finish review" });
+    var reopened = new TaskInteractionStore(folder); reopened.Recover(_ => false);
+    Assert(reopened.Get(message.Id).Status == InteractionStatus.Rejected, "Unknown turn steering was replayable.");
+    Assert(reopened.Get(reply.Id).Status == InteractionStatus.Canceled, "Orphaned clarification remained pending.");
+    Assert(reopened.Get(obligation.Id).Status == InteractionStatus.Pending, "Required obligation disappeared after stop.");
+    await Task.CompletedTask;
+});
+await Test("Clarification replies are scoped to their task", async () =>
+{
+    await using var r = await NewRuntime();
+    var state = (ProjectState)typeof(ProjectRuntime).GetField("_state", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(r)!;
+    var a = new WorkUnit { Status = WorkStatus.Running }; var b = new WorkUnit { Status = WorkStatus.Running };
+    state.Work.Add(a); state.Work.Add(b);
+    var store = (TaskInteractionStore)typeof(ProjectRuntime).GetField("_interactions", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(r)!;
+    var item = store.Add(new TaskInteraction { WorkId = a.Id, Kind = InteractionKind.Clarification, Status = InteractionStatus.Pending, Scope = "file", Text = "Which file?" });
+    var denied = false; try { await r.ReplyClarificationAsync(b.Id, item.Id, "a.cs"); } catch (InvalidOperationException) { denied = true; }
+    Assert(denied, "A different task answered a scoped request.");
+    Assert((await r.ReplyClarificationAsync(a.Id, item.Id, "a.cs")).Response == "a.cs", "Exact reply was not retained.");
+});
+await Test("Optional followup requires explicit acceptance and retains lineage", async () =>
+{
+    await using var r = await NewRuntime(); r.Configure("Write-Output passed");
+    var state = (ProjectState)typeof(ProjectRuntime).GetField("_state", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(r)!;
+    var parent = new WorkUnit { Status = WorkStatus.Completed, Task = "Original" }; state.Work.Add(parent);
+    var store = (TaskInteractionStore)typeof(ProjectRuntime).GetField("_interactions", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(r)!;
+    var proposal = store.Add(new TaskInteraction { WorkId = parent.Id, Kind = InteractionKind.Followup, Status = InteractionStatus.Pending, Text = "Write-Output accepted" });
+    Assert(r.Snapshot.Work.Count == 1, "A proposal launched work automatically.");
+    var id = await r.AcceptFollowup(parent.Id, proposal.Id);
+    Assert(r.Snapshot.Work.Single(x => x.Id == id).ParentId == parent.Id, "Accepted followup lost its lineage.");
+    Assert(store.Get(proposal.Id).Status == InteractionStatus.Acknowledged, "Acceptance was not durable.");
+    await r.WaitForIdleAsync();
+});
+await Test("Wait cycles and peer disappearance settle deterministically", async () =>
+{
+    await using var r = await NewRuntime();
+    var state = (ProjectState)typeof(ProjectRuntime).GetField("_state", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(r)!;
+    var a = new WorkUnit { Status = WorkStatus.Running }; var b = new WorkUnit { Status = WorkStatus.Running };
+    state.Work.Add(a); state.Work.Add(b);
+    r.CreateWait(a.Id, WaitKind.Task, b.Id);
+    var denied = false; try { r.CreateWait(b.Id, WaitKind.Task, a.Id); } catch (InvalidOperationException) { denied = true; }
+    Assert(denied, "A task dependency cycle was accepted.");
+    var peer = r.AskPeer(a.Id, b.Id, "Review this");
+    b.Status = WorkStatus.Canceled;
+    typeof(ProjectRuntime).GetMethod("OnInteractionOwnerEnded", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.Invoke(r, [b.Id]);
+    Assert(r.InspectInteractions(a.Id).Single(x => x.Id == peer.Id).Status == InteractionStatus.Rejected, "Peer disappearance left request pending.");
+});
 const string ChangeRetries = "Set-Content settings.json '{\"retries\":2,\"cancellation\":false}'; git diff";
 const string ChangeCancel = "Set-Content settings.json '{\"retries\":1,\"cancellation\":true}'; git diff";
 
@@ -661,5 +721,3 @@ internal sealed class RepeatedContentionHost(string project) : IWorkHost
         return new(0, true, null);
     }
 }
-
-

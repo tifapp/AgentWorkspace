@@ -5,7 +5,31 @@ try
 {
     if (args.Length == 0 || args[0] == "help")
     {
-        Console.WriteLine("agent-os: Codex-only Windows runtime\n  doctor\n  practice <parent-folder>\n  walkthrough <parent-folder> [data-folder]\n  run <project> <validation-command> <task>\n  status <project> [data-folder]\n  map-save <project> <json-file> [data-folder] [expected-revision]\n  map-list <project> [data-folder]\n  map-start <project> <map-id> [data-folder]\n  decide <project> <decision-id> approve|reject [data-folder]");
+        Console.WriteLine(@"agent-os: Codex-only Windows runtime
+  doctor
+  practice <parent-folder>
+  walkthrough <parent-folder> [data-folder]
+  run <project> <validation-command> <task>
+  status <project> [data-folder]
+  map-save <project> <json-file> [data-folder] [expected-revision]
+  map-list <project> [data-folder]
+  map-start <project> <map-id> [data-folder]
+  submit <project> <task> [request-id]
+  reply-after <project> <work-id> <text> [request-id]
+  peer <project> <work-id> <target-work-id> <question> [deadline]
+  ack-peer <project> <work-id> <request-id> <response>
+  handoff-peer <project> <work-id> <request-id> <new-work-id>
+  resolve-wait <project> <work-id> <wait-id> <resolution>
+  inspect <project> <work-id>
+  cancel <project> <work-id>
+  interactions <project> [work-id]
+  steer <project> <work-id> <text>
+  reply <project> <work-id> <clarification-id> <text>
+  followup <project> <work-id> <proposal-id>
+  resolve <project> <work-id> <obligation-id> <text>
+  wait <project> <work-id> task|message|decision|resource <target-id> [deadline]
+  cancel-wait <project> <work-id> <wait-id>
+  decide <project> <decision-id> approve|reject [data-folder]");
         return 0;
     }
     switch (args[0])
@@ -54,6 +78,115 @@ try
             await using var runtime = await ProjectRuntime.OpenAsync(args[1], args.ElementAtOrDefault(2));
             Console.WriteLine(JsonSerializer.Serialize(runtime.Snapshot, JsonFormat.Options)); return 0;
         }
+        case "submit":
+        {
+            var request = args.ElementAtOrDefault(3) ?? Guid.NewGuid().ToString("N");
+            var remote = await ProjectClient.SubmitAsync(args[1], args[2], request);
+            if (remote != null) { Console.WriteLine(remote); return 0; }
+            await using var runtime = await ProjectRuntime.OpenAsync(args[1]);
+            var id = await runtime.StartAsync(args[2], externalRequestId: request); Console.WriteLine(id); await runtime.WaitForIdleAsync(); return 0;
+        }
+        case "reply-after":
+        {
+            var request = args.ElementAtOrDefault(4) ?? Guid.NewGuid().ToString("N");
+            var remote = await ProjectClient.ReplyAfterAsync(args[1], args[2], args[3], request);
+            if (remote != null) { Console.WriteLine(remote); return 0; }
+            await using var runtime = await ProjectRuntime.OpenAsync(args[1]);
+            var id = await runtime.ReplyAfterCompletionAsync(args[2], args[3], request); Console.WriteLine(id); await runtime.WaitForIdleAsync(); return 0;
+        }
+        case "peer":
+        {
+            var remote = await ProjectClient.AskPeerAsync(args[1], args[2], args[3], args[4], args.Length > 5 ? DateTimeOffset.Parse(args[5]) : null);
+            if (remote == null) throw new InvalidOperationException("The owning runtime is not running.");
+            Console.WriteLine(JsonSerializer.Serialize(remote, JsonFormat.Options)); return 0;
+        }
+        case "ack-peer":
+        {
+            var remote = await ProjectClient.AckPeerAsync(args[1], args[2], args[3], args[4]);
+            if (remote == null) throw new InvalidOperationException("The owning runtime is not running.");
+            Console.WriteLine(JsonSerializer.Serialize(remote, JsonFormat.Options)); return 0;
+        }
+        case "handoff-peer":
+        {
+            var remote = await ProjectClient.HandoffPeerAsync(args[1], args[2], args[3], args[4]);
+            if (remote == null) throw new InvalidOperationException("The owning runtime is not running.");
+            Console.WriteLine(JsonSerializer.Serialize(remote, JsonFormat.Options)); return 0;
+        }
+        case "resolve-wait":
+        {
+            var remote = await ProjectClient.ResolveWaitAsync(args[1], args[2], args[3], args[4]);
+            if (remote == null) throw new InvalidOperationException("The owning runtime is not running.");
+            Console.WriteLine(JsonSerializer.Serialize(remote, JsonFormat.Options)); return 0;
+        }
+        case "inspect":
+        {
+            var remote = await ProjectClient.InspectAsync(args[1], args[2]);
+            if (remote != null) { Console.WriteLine(JsonSerializer.Serialize(remote, JsonFormat.Options)); return 0; }
+            await using var runtime = await ProjectRuntime.OpenAsync(args[1]);
+            Console.WriteLine(JsonSerializer.Serialize(runtime.Snapshot.Work.Single(x => x.Id == args[2]), JsonFormat.Options)); return 0;
+        }
+        case "cancel":
+        {
+            var remote = await ProjectClient.CancelAsync(args[1], args[2]);
+            if (remote != null) { Console.WriteLine(JsonSerializer.Serialize(remote, JsonFormat.Options)); return 0; }
+            await using var runtime = await ProjectRuntime.OpenAsync(args[1]);
+            runtime.Cancel(args[2]); await runtime.WaitForIdleAsync();
+            Console.WriteLine(JsonSerializer.Serialize(runtime.Snapshot.Work.Single(x => x.Id == args[2]), JsonFormat.Options)); return 0;
+        }
+        case "interactions":
+        {
+            var remote = await ProjectClient.InteractionsAsync(args[1], args.ElementAtOrDefault(2));
+            if (remote != null) { Console.WriteLine(JsonSerializer.Serialize(remote, JsonFormat.Options)); return 0; }
+            await using var runtime = await ProjectRuntime.OpenAsync(args[1]);
+            Console.WriteLine(JsonSerializer.Serialize(runtime.InspectInteractions(args.ElementAtOrDefault(2)), JsonFormat.Options)); return 0;
+        }
+        case "steer":
+        {
+            var remote = await ProjectClient.SteerAsync(args[1], args[2], args[3]);
+            if (remote == null) throw new InvalidOperationException("The owning runtime is not running.");
+            Console.WriteLine(JsonSerializer.Serialize(remote, JsonFormat.Options)); return 0;
+        }
+        case "reply":
+        {
+            var remote = await ProjectClient.ReplyAsync(args[1], args[2], args[3], args[4]);
+            if (remote == null) throw new InvalidOperationException("The owning runtime is not running.");
+            Console.WriteLine(JsonSerializer.Serialize(remote, JsonFormat.Options)); return 0;
+        }
+        case "followup":
+        {
+            var started = await ProjectClient.AcceptFollowupAsync(args[1], args[2], args[3]);
+            if (started != null) { Console.WriteLine(started); return 0; }
+            await using var runtime = await ProjectRuntime.OpenAsync(args[1]);
+            var id = await runtime.AcceptFollowup(args[2], args[3]); Console.WriteLine(id); await runtime.WaitForIdleAsync(); return 0;
+        }
+        case "resolve":
+        {
+            var remote = await ProjectClient.ResolveAsync(args[1], args[2], args[3], args[4]);
+            if (remote != null) { Console.WriteLine(JsonSerializer.Serialize(remote, JsonFormat.Options)); return 0; }
+            await using var runtime = await ProjectRuntime.OpenAsync(args[1]);
+            Console.WriteLine(JsonSerializer.Serialize(runtime.ResolveObligation(args[2], args[3], args[4]), JsonFormat.Options)); return 0;
+        }
+        case "wait":
+        {
+            var kind = Enum.Parse<WaitKind>(args[3], true);
+            var deadline = args.Length > 5 ? DateTimeOffset.Parse(args[5]) : (DateTimeOffset?)null;
+            var remote = await ProjectClient.WaitAsync(args[1], args[2], kind, args[4], deadline);
+            if (remote == null) throw new InvalidOperationException("The owning runtime is not running.");
+            while (remote.Status == InteractionStatus.Pending)
+            {
+                await Task.Delay(250);
+                var current = await ProjectClient.InteractionsAsync(args[1], args[2]) ?? throw new IOException("The owning runtime stopped; inspect the durable wait after reopening.");
+                remote = current.Single(x => x.Id == remote.Id);
+            }
+            Console.WriteLine(JsonSerializer.Serialize(remote, JsonFormat.Options)); return remote.Status == InteractionStatus.Resolved ? 0 : 1;
+        }
+        case "cancel-wait":
+        {
+            var remote = await ProjectClient.CancelWaitAsync(args[1], args[2], args[3]);
+            if (remote != null) { Console.WriteLine(JsonSerializer.Serialize(remote, JsonFormat.Options)); return 0; }
+            await using var runtime = await ProjectRuntime.OpenAsync(args[1]);
+            Console.WriteLine(JsonSerializer.Serialize(runtime.CancelWait(args[2], args[3]), JsonFormat.Options)); return 0;
+        }
         case "decide":
         {
             if (args[3] is not ("approve" or "reject")) throw new ArgumentException("Choose approve or reject.");
@@ -92,6 +225,3 @@ try
     }
 }
 catch (Exception e) { Console.Error.WriteLine(e.ToString()); return 1; }
-
-
-
