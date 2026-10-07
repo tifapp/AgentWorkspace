@@ -23,7 +23,7 @@ internal sealed class TaskRow
   this.id=id;this.followUp=followUp;this.menu=menu;this.preview=preview;
   var card=new StackPanel{Spacing=3,Padding=new Thickness(7,4,7,4)};
   var top=new Grid{ColumnSpacing=5};top.ColumnDefinitions.Add(new(){Width=new GridLength(1,GridUnitType.Star)});top.ColumnDefinitions.Add(new(){Width=GridLength.Auto});
-  var prompt=new StackPanel{Orientation=Orientation.Horizontal,Spacing=5};var chat=new SymbolIcon(Symbol.Message){Width=16,Height=16};AutomationProperties.SetName(chat,"Task prompt");prompt.Children.Add(chat);prompt.Children.Add(title);top.Children.Add(prompt);
+  var prompt=new Grid{ColumnSpacing=5};prompt.ColumnDefinitions.Add(new(){Width=GridLength.Auto});prompt.ColumnDefinitions.Add(new(){Width=new GridLength(1,GridUnitType.Star)});var chat=new SymbolIcon(Symbol.Message){Width=16,Height=16};AutomationProperties.SetName(chat,"Task prompt");prompt.Children.Add(chat);Grid.SetColumn(title,1);prompt.Children.Add(title);top.Children.Add(prompt);
   var actions=new StackPanel{Orientation=Orientation.Horizontal,Spacing=3};AutomationProperties.SetAutomationId(details,"TaskDetails");details.Click+=(_,_)=>open(id);actions.Children.Add(details);
   AutomationProperties.SetAutomationId(stopButton,"CancelTask");stopButton.Click+=async(_,_)=>await stop(id);actions.Children.Add(stopButton);
   var more=new Button{Content="⋯"};AutomationProperties.SetAutomationId(more,"TaskActions");AutomationProperties.SetName(more,"More task actions");more.Click+=(_,_)=>menu().ShowAt(more);actions.Children.Add(more);Grid.SetColumn(actions,1);top.Children.Add(actions);card.Children.Add(top);
