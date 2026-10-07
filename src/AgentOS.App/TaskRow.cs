@@ -3,12 +3,13 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Windows.System;
 namespace AgentOS.App;
 internal sealed class TaskRow
 {
- readonly Func<string,string,Task> followUp; readonly Func<MenuFlyout> menu; readonly bool preview;
+ readonly string id; readonly Func<string,string,Task> followUp; readonly Func<MenuFlyout> menu; readonly bool preview;
  readonly TextBlock title=MainWindow.Label("",13,true),status=MainWindow.Label("",12),snippet=MainWindow.Label("",12),pending=MainWindow.Label("Release decision pending",12);
  readonly TextBox reply=new(){Header="Follow-up task",PlaceholderText="Describe the next change",AcceptsReturn=true,TextWrapping=TextWrapping.Wrap,MinHeight=58};
  readonly TextBox report=new(){IsReadOnly=true,AcceptsReturn=true,TextWrapping=TextWrapping.Wrap,MaxHeight=250};
@@ -19,7 +20,7 @@ internal sealed class TaskRow
  public StackPanel Root{get;}=new(); public StackPanel Children{get;}=new(){Spacing=5,Margin=new Thickness(16,2,0,3)};
  public TaskRow(string id,Action<string> open,Func<string,string,Task> followUp,Func<string,Task> stop,Func<string,Task> reviewDecision,Func<MenuFlyout> menu,Func<bool> autoChoice,Action<bool> setAutoChoice,bool preview)
  {
-  this.followUp=followUp;this.menu=menu;this.preview=preview;
+  this.id=id;this.followUp=followUp;this.menu=menu;this.preview=preview;
   var card=new StackPanel{Spacing=3,Padding=new Thickness(7,4,7,4)};
   var top=new Grid{ColumnSpacing=5};top.ColumnDefinitions.Add(new(){Width=new GridLength(1,GridUnitType.Star)});top.ColumnDefinitions.Add(new(){Width=GridLength.Auto});
   var prompt=new StackPanel{Orientation=Orientation.Horizontal,Spacing=5};var chat=new SymbolIcon(Symbol.Message){Width=16,Height=16};AutomationProperties.SetName(chat,"Task prompt");prompt.Children.Add(chat);prompt.Children.Add(title);top.Children.Add(prompt);
