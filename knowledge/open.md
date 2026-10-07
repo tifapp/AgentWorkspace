@@ -1,4 +1,4 @@
-# Open guarantees
+﻿# Open guarantees
 
 - Arbitrary native SDK commands, including dotnet test, are not verified managed surfaces. Establish actual tool isolation and output before advertising support.
 - External deployment, user databases, other Windows accounts and unmanaged programs are outside the coordinated surface.
@@ -10,4 +10,5 @@ Checked 2026-10-07 at 68c92e8+dirty. Recheck after runtime, host, platform or mi
 
 ## Current integration work
 
-The approved Windows/Codex program remains incomplete. The draft-map source requires native compile and integration validation. Foreground capture, isolated context microagent, real canvas, steering/wait delivery, external adapters, VM profile, notifications, tray, and signed updater remain open. Phone work is explicitly deferred.
+The approved Windows/Codex program remains incomplete. The integrated `3fbb628` archive passed the supplied native build and 46/46 test run; this does not close final integration or managed runtime validation. Managed coordinator isolation fix task `9a6daa2207124ad69ad8716a1a04a28a` is underway. Real foreground capture, VM confinement, signed installation, and GitHub/Postgres/deployment effects remain unverified. Phone work is explicitly deferred. See [integration progress](integration-progress.md) for the source identity, fixture limits, journal incident, and recovery.
+
