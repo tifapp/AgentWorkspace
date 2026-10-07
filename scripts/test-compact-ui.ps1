@@ -19,7 +19,15 @@ try {
   } while($clock.Elapsed.TotalSeconds -lt 5)
   throw "Missing UIA control: $id"
  }
- function InvokeId([string]$id,[System.Windows.Automation.AutomationElement]$scope=$window){(RequireId $id $scope).GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()}
+ function InvokeId([string]$id,[System.Windows.Automation.AutomationElement]$scope=$window){
+  $control=RequireId $id $scope
+  $clock=[System.Diagnostics.Stopwatch]::StartNew()
+  do {
+   if($control.Current.IsEnabled){$control.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke();return}
+   Start-Sleep -Milliseconds 75
+  } while($clock.Elapsed.TotalSeconds -lt 5)
+  throw "UIA control did not become enabled: $id"
+ }
  function CompletedRowInView([string]$childId) {
   $list=RequireId 'WorkList'
   $scroll=$list.GetCurrentPattern([System.Windows.Automation.ScrollPattern]::Pattern)
