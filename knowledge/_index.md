@@ -1,6 +1,7 @@
 # Project knowledge
 
 - [Decisions](decisions.md): approved Windows/Codex scope, historical retirement and current delivery boundaries.
+- [Coordination kernel](coordination-kernel.md): 2026-10-07 approved future end state and acceptance plan, unimplemented.
 - [Integration progress](integration-progress.md): source identity, native evidence and outstanding acceptance.
 - [Open verification](open.md): prerequisites and evidence still needed.
 - [Conflict continuity verification](conflict-continuity.md): native pinned SDK results, receipts and acceptance limits.
