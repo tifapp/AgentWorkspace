@@ -5,6 +5,7 @@ namespace AgentOS.App;
 public partial class App : Application
 {
     private Window? _window;
+    private CaptureController? _capture;
     public App()
     {
         UnhandledException += (_, e) =>
@@ -18,6 +19,8 @@ public partial class App : Application
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
         _window = new MainWindow();
+        _capture = new CaptureController(_window);
         _window.Activate();
     }
 }
+
