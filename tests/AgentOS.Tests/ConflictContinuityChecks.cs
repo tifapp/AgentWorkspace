@@ -86,7 +86,7 @@ internal static class ConflictContinuityChecks
    var state=(ProjectState)typeof(ProjectRuntime).GetField("_state",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic)!.GetValue(r)!;state.Work.Single(x=>x.Id==b).AutoIntegrate=true;
    await r.AfterManagedTurnAsync(b,CancellationToken.None);var second=Notice(r,b);
    Check(second.Id!=first.Id&&second.CurrentCommit==afterC&&second.Response==null,"New holder version did not create a new response obligation.");
-   Check(first.Response!=null&&first.DeferredCandidateCommit!=null&&await Ref(r)==afterC,"Old response/candidate or C publication was lost.");
+   Check(r.Snapshot.Conflicts.Single(x=>x.Id==first.Id).Response!=null&&first.DeferredCandidateCommit!=null&&r.Snapshot.Conflicts.Single(x=>x.Id==first.Id).DeferredCandidateCommit==first.DeferredCandidateCommit&&(await Commands.Git(project,"rev-parse","refs/agent-os/deferred/"+first.Id)).Checked()==first.DeferredCandidateCommit&&await Ref(r)==afterC,"Old response/candidate or C publication was lost.");
    Check((await Show(r,"settings.json")).Contains("\"retries\":3")&&(await Show(r,"c-only.txt")).Trim()=="c","C publication was overwritten.");
    r.RespondToConflict(b,second.Id,"Reconcile C setting too.");
    File.WriteAllText(Path.Combine(Work(r,b).Workspace,"settings.json"),"{\"retries\":3,\"cancellation\":true}");r.ResolveConflict(b,second.Id,"Keep C retries and local cancellation.");
