@@ -202,7 +202,7 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
                 if (line.Length > 3000) line = line[..3000] + "...";
                 Mutate(() => { Event(work.Id, "Codex", line); });
             }, token);
-            Mutate(() => { work.ThreadId = result.ThreadId; work.CodexReport = result.Report; work.HostModel = result.Model; });
+            Mutate(() => { work.ThreadId = result.ThreadId; work.CodexReport = result.Report; if (result.TurnCompleted && result.ExitCode == 0 && work.Relationship == WorkRelationship.Revision && RevisionTitle.FromReport(result.Report) is { } title) work.Title = title; work.HostModel = result.Model; });
             if(work.SdkShutdownDebt||WorkExecution.HasUnknownOwnership(_store.Root,work.Id)){MarkSdkUnknown(work.Id);return;}
             if (result.ExitCode != 0 || !result.TurnCompleted)
             {
@@ -426,6 +426,7 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
         var old = Find(id);
         if (old.IsActive && !_state.HistoricalWorkIds.Contains(old.Id)) throw new InvalidOperationException("Wait for this task to finish or cancel it first.");
         var prompt = old.Task + "\n\nThis is a revision of earlier work. Read the CURRENT files first and preserve changes already integrated by other tasks. " +
+            "In the first line of your final response, write Revision title: followed by your own concise title for this revision (110 characters or fewer). Then report the result. " +
             "The previous outcome was: " + old.Detail + "\nPrevious proposed diff (context only; do not apply blindly):\n" + old.Diff;
         return await StartCore(prompt,old.AutoIntegrate,old.Id,null,null,WorkRelationship.Revision);
     }
@@ -575,8 +576,3 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
         _lifetime.Dispose(); _projectLock.Dispose(); _publication.Dispose(); _runtimeRegistration.Dispose();
     }
 }
-
-
-
-
-

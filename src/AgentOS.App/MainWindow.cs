@@ -278,7 +278,7 @@ public sealed class MainWindow : Window
         Reconcile(tree,state.Work.Where(x=>x.ParentId==null||!rows.ContainsKey(x.ParentId)).Reverse().Select(x=>x.Id).ToArray());
         foreach(var work in state.Work){Reconcile(rows[work.Id].Children,state.Work.Where(x=>x.ParentId==work.Id).Select(x=>x.Id).ToArray());rows[work.Id].UpdateChildren();}
         DispatcherQueue.TryEnqueue(()=>{if(Math.Abs(map.VerticalOffset-scrollOffset)>1)map.ChangeView(null,scrollOffset,null,true);});
-        if(detailsOpen){var shown=state.Work.FirstOrDefault(x=>x.Id==selected);if(shown!=null){if(ConflictFingerprint(state,shown)!=detailConflictFingerprint)DrawDetails();detailHeading.Text=shown.StatusLabel+" | "+shown.ShortTask;detailStatus.Text=shown.Detail;if(detailReport!=null&&detailReport.Text!=(shown.CodexReport??""))detailReport.Text=shown.CodexReport??"";}}
+        if(detailsOpen){var shown=state.Work.FirstOrDefault(x=>x.Id==selected);if(shown!=null){if(ConflictFingerprint(state,shown)!=detailConflictFingerprint)DrawDetails();detailHeading.Text=(shown.Relationship==WorkRelationship.Revision?"Revision: ":"")+shown.StatusLabel+" | "+shown.ShortTask;detailStatus.Text=shown.Detail;if(detailReport!=null&&detailReport.Text!=(shown.CodexReport??""))detailReport.Text=shown.CodexReport??"";}}
     }
     void Reconcile(StackPanel parent,string[] ids)
     {
@@ -309,7 +309,7 @@ public sealed class MainWindow : Window
         detailBody.Children.Clear();detailReport=null;
         var work=snapshot?.Work.FirstOrDefault(x=>x.Id==selected);if(work==null)return; detailConflictFingerprint=ConflictFingerprint(snapshot!,work);
         detailBody.Children.Add(Row(Action("Back",()=>{CloseDetails();return Task.CompletedTask;},"BackToTasks"),Action("Refresh details",()=>{DrawDetails();return Task.CompletedTask;},"RefreshDetails")));
-        detailHeading.Text=work.StatusLabel+" | "+work.ShortTask;detailBody.Children.Add(detailHeading);
+        detailHeading.Text=(work.Relationship==WorkRelationship.Revision?"Revision: ":"")+work.StatusLabel+" | "+work.ShortTask;detailBody.Children.Add(detailHeading);
         detailStatus.Text=work.Detail;detailBody.Children.Add(detailStatus);
         if(work.ParentId!=null&&snapshot!.Work.FirstOrDefault(x=>x.Id==work.ParentId) is { } original)
             detailBody.Children.Add(Action("Parent task",()=>{OpenDetails(original.Id);return Task.CompletedTask;},"OriginalTask"));
@@ -441,35 +441,3 @@ public sealed class MainWindow : Window
     static Border Card(string title,UIElement content)
     {var stack=new StackPanel{Spacing=5};stack.Children.Add(Label(title,13,true));stack.Children.Add(content);return new Border{Child=stack,Padding=new Thickness(10),CornerRadius=new CornerRadius(6),BorderThickness=new Thickness(1),Background=Application.Current.Resources["CardBackgroundFillColorDefaultBrush"] as Brush,BorderBrush=Application.Current.Resources["CardStrokeColorDefaultBrush"] as Brush};}
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

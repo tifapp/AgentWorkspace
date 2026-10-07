@@ -173,6 +173,8 @@ public sealed partial class ProjectRuntime
     if(task.WorkId==null&&root!=null)task.WorkId=root.Id;
    }
   foreach(var work in _state.Work.Where(w=>w.Relationship==WorkRelationship.Unknown))work.Relationship=work.ParentId==null?WorkRelationship.Original:IsRevisionAttempt(work)?WorkRelationship.Revision:WorkRelationship.Followup;
+  foreach(var work in _state.Work.Where(w=>w.Relationship==WorkRelationship.Revision&&string.IsNullOrWhiteSpace(w.Title)))
+   work.Title=RevisionTitle.FromReport(work.CodexReport)??_state.Work.FirstOrDefault(parent=>parent.Id==work.ParentId)?.ShortTask;
   foreach(var work in _state.Work.Where(w=>w.Relationship==WorkRelationship.Followup))AddFollowupMapNode(work);
   var interactions=_interactions.Inspect();
   foreach(var map in _state.Maps)

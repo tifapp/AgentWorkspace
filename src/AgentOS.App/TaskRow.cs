@@ -47,7 +47,7 @@ internal sealed class TaskRow
  public void UpdateChildren()=>Children.Visibility=Children.Children.Count==0?Visibility.Collapsed:Visibility.Visible;
  public void Patch(WorkUnit work,bool decision)
  {
-  title.Text=work.ShortTask;status.Text=work.StatusLabel+" · "+work.CreatedAt.ToLocalTime().ToString("g");
+  title.Text=work.ShortTask;status.Text=(work.Relationship==WorkRelationship.Revision?"Revision: ":"")+work.StatusLabel+" · "+work.CreatedAt.ToLocalTime().ToString("g");
   stateIcon.Glyph=work.Status switch{WorkStatus.Completed=>"\uE73E",WorkStatus.Failed or WorkStatus.Canceled=>"\uEA39",WorkStatus.Waiting=>"\uE916",WorkStatus.NeedsResponse=>"\uE7BA",WorkStatus.Parked=>"\uE8A7",WorkStatus.Abandoned=>"\uEA39",WorkStatus.Stale or WorkStatus.Unknown=>"\uE897",WorkStatus.Private=>"\uE8A7",_=>"\uE895"};AutomationProperties.SetName(stateIcon,work.StatusLabel);
   var value=(work.Status==WorkStatus.Completed?work.CodexReport:work.Detail)?.Trim();if(string.IsNullOrWhiteSpace(value))value="No result yet.";value=string.Join(" ",value.Split('\n').Take(2)).Trim();snippet.Text=value.Length>180?value[..177]+"…":value;
   pending.Visibility=decision?Visibility.Visible:Visibility.Collapsed;reviewButton.Visibility=decision?Visibility.Visible:Visibility.Collapsed;reviewButton.IsEnabled=!preview;
@@ -56,4 +56,3 @@ internal sealed class TaskRow
   AutomationProperties.SetName(reply,"Follow-up task for "+work.ShortTask);if(lastStatus!=work.Status){AutomationProperties.SetName(Root,work.StatusLabel+": "+work.ShortTask);AutomationProperties.SetLiveSetting(status,AutomationLiveSetting.Polite);lastStatus=work.Status;}
  }
 }
-

@@ -56,8 +56,8 @@ public sealed partial class ProjectRuntime
     }
     internal void MarkPeerDelivered(string toWorkId, string messageId)
     {
-        if (!HasLiveTask(toWorkId)) throw new InvalidOperationException("Peer target ended before delivery.");
-        Mutate(() => { var item = _state.PeerMessages.Single(x => x.Id == messageId && x.ToWorkId == toWorkId); if (item.DeliveredAt == null) { item.DeliveredAt = DateTimeOffset.UtcNow; Event(toWorkId, "PeerDelivered", $"Message {messageId} delivered."); } });
+        if (!HasLiveTask(toWorkId)) throw new InvalidOperationException("Target task has ended.");
+        Mutate(() => { var item = _state.PeerMessages.Single(x => x.Id == messageId && x.ToWorkId == toWorkId); if (item.DeliveredAt != null) return; item.DeliveredAt = DateTimeOffset.UtcNow; Event(toWorkId, "PeerDelivered", $"Message {messageId} delivered."); });
     }
     public InterruptRequest InterruptManagedTask(string fromWorkId, string targetWorkId, string reason)
     {
@@ -74,17 +74,16 @@ public sealed partial class ProjectRuntime
         if (string.IsNullOrWhiteSpace(explanation)) throw new ArgumentException("Escalation explanation is required.");
         var notice = FindConflict(workId, conflictId);
         if (notice.Response == null) throw new InvalidOperationException("Respond first.");
-        HumanEscalation? item = null;
-        Mutate(() =>
+        lock (_sync)
         {
-            item = _state.Escalations.FirstOrDefault(x => x.WorkId == workId && x.ConflictId == notice.Id && x.Explanation == explanation.Trim());
-            if (item != null) return;
-            item = new HumanEscalation { WorkId = workId, ConflictId = notice.Id, Explanation = explanation.Trim() };
-            _state.Escalations.Add(item);
-            Event(workId, "HumanEscalation", item.Explanation);
-        });
-        return JsonFormat.Copy(item!);
-    }    internal void RecordHostThread(string workId, string threadId)
+            var existing = _state.Escalations.FirstOrDefault(x => x.WorkId == workId && x.ConflictId == notice.Id && x.Explanation == explanation.Trim());
+            if (existing != null) return JsonFormat.Copy(existing);
+            var item = new HumanEscalation { WorkId = workId, ConflictId = notice.Id, Explanation = explanation.Trim() };
+            Mutate(() => { _state.Escalations.Add(item); Event(workId, "HumanEscalation", item.Explanation); });
+            return JsonFormat.Copy(item);
+        }
+    }
+    internal void RecordHostThread(string workId, string threadId)
     {
         if (string.IsNullOrWhiteSpace(threadId)) throw new InvalidDataException("Codex did not provide a thread identity.");
         Mutate(() => Find(workId).ThreadId = threadId);
@@ -188,7 +187,7 @@ public sealed partial class ProjectRuntime
                 {
                     var result = await _host.Run(work, _state.CodexPath, LogPath(work, "codex-resumed-" + Guid.NewGuid().ToString("N") + ".jsonl"),
                         line => Mutate(() => Event(work.Id, "Codex", line.Length > 3000 ? line[..3000] : line)), source.Token);
-                    Mutate(() => { work.ThreadId = result.ThreadId; work.CodexReport = result.Report; work.HostModel = result.Model; });
+                    Mutate(() => { work.ThreadId = result.ThreadId; work.CodexReport = result.Report; if (result.TurnCompleted && result.ExitCode == 0 && work.Relationship == WorkRelationship.Revision && RevisionTitle.FromReport(result.Report) is { } title) work.Title = title; work.HostModel = result.Model; });
                     if (!result.TurnCompleted || result.ExitCode != 0) Set(work, WorkStatus.NeedsResponse, "Resumed thread ended without a confirmed turn; candidate and response obligation retained.");
                 }
                 catch (OperationCanceledException) { Set(work, _state.Conflicts.Any(x => x.WorkId == work.Id && !x.Resolved && !x.Abandoned && x.Response == null) ? WorkStatus.NeedsResponse : WorkStatus.Parked, "Conflict continuation canceled; candidate retained."); }
@@ -197,5 +196,3 @@ public sealed partial class ProjectRuntime
         }
     }
 }
-
-

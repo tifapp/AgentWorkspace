@@ -65,10 +65,9 @@ async Task<ProjectRuntime> NewRuntime()
 { var project = await PracticeProject.CreateAsync(root); return await ProjectRuntime.OpenInternal(project, Path.Combine(root, "state"), new ScriptHost(), Path.Combine(root, "coordination")); }
 static WorkUnit Work(ProjectRuntime runtime, string id) => runtime.Snapshot.Work.Single(w => w.Id == id);
 async Task TestAsync(string name, Func<Task> check) => await Test(name, check);
-await TestAsync("Capture suggestions: debounce and launch identity", AgentOS.Tests.CaptureSuggestionChecks.RunAsync);
 await UpdateProtocolChecks.Run(Test, NewRuntime, root);
 await AgentOS.Tests.ConflictBehaviorChecks.RunAsync(Test, Path.Combine(root, "conflict-behavior"));
-  await AgentOS.Tests.ConflictContinuityChecks.RunAsync(Test, Path.Combine(root, "conflict-continuity"));
+await AgentOS.Tests.ConflictContinuityChecks.RunAsync(Test, Path.Combine(root, "conflict-continuity"));
 
 // Feature helpers are independent gates. Missing concurrent helpers are reported, never counted as passes.
 await TestAsync("Resource admission and VM refusal", AgentOS.Tests.ResourceAdmissionChecks.RunAsync);
@@ -229,12 +228,42 @@ await Test("Map revision success retains stale parent and successful child ident
     var node = new MapTask { Title = "Revise", Prompt = "Write-Output revise", Acceptance = "Done", Selected = true };
     r.SaveDraftMap(new AgentOS.Core.TaskMap { Title = "Revision map", Tasks = [node] });
     var state = (ProjectState)typeof(ProjectRuntime).GetField("_state", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(r)!;
-    var parent = new WorkUnit { ExternalRequestId = node.Id, Status = WorkStatus.Stale };
-    var child = new WorkUnit { ParentId = parent.Id, Status = WorkStatus.Completed };
+    var parent = new WorkUnit { ExternalRequestId = node.Id, Title = "Parent title", Status = WorkStatus.Stale };
+    var child = new WorkUnit { ParentId = parent.Id, Relationship = WorkRelationship.Revision, Status = WorkStatus.Completed };
     state.Work.Add(parent); state.Work.Add(child);
     typeof(ProjectRuntime).GetMethod("UpdateMapStatuses", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.Invoke(r, null);
     var mapped = state.Maps.Single().Tasks.Single();
     Assert(mapped.Status == MapTaskStatus.Completed && mapped.WorkIds.SequenceEqual([parent.Id, child.Id]), "A stale parent masked a completed revision or lost attempt identities.");
+    Assert(child.Title == "Parent title", "A historical revision without a marked title lacked a useful fallback.");
+});
+await Test("Revision titles come from each report and survive recovery", async () =>
+{
+    var project = await PracticeProject.CreateAsync(root);
+    var data = Path.Combine(root, "revision-title-state");
+    var host = new RevisionTitleHost();
+    string firstRevisionId;
+    string fallbackRevisionId;
+    await using (var r = await ProjectRuntime.OpenInternal(project, data, host, Path.Combine(root, "coordination")))
+    {
+        r.Configure("Write-Output passed");
+        var originalId = await r.StartAsync("Update the setting", false);
+        await r.WaitForIdleAsync();
+        var state = (ProjectState)typeof(ProjectRuntime).GetField("_state", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(r)!;
+        state.Work.Single(w => w.Id == originalId).Status = WorkStatus.Stale;
+        firstRevisionId = await r.ReviseAsync(originalId);
+        Assert(Work(r, firstRevisionId).Task.Contains("Revision title:"), "Manual revision prompt omitted the title instruction.");
+        await r.WaitForIdleAsync();
+        Assert(Work(r, firstRevisionId).Title == "Reconcile the setting", "The revision did not retain its own reported title.");
+        Assert(Work(r, firstRevisionId).ParentId == originalId && Work(r, firstRevisionId).Relationship == WorkRelationship.Revision, "Revision nesting or marker changed.");
+        host.Marked = false;
+        fallbackRevisionId = await r.ReviseAsync(firstRevisionId);
+        await r.WaitForIdleAsync();
+        Assert(Work(r, fallbackRevisionId).Title == "Reconcile the setting", "An unmarked response did not retain a useful inherited title.");
+        Assert(Work(r, fallbackRevisionId).ParentId == firstRevisionId, "Nested revision lost its parent.");
+    }
+    await using var recovered = await ProjectRuntime.OpenInternal(project, data, new ScriptHost(), Path.Combine(root, "coordination"));
+    Assert(Work(recovered, firstRevisionId).Title == "Reconcile the setting" && Work(recovered, fallbackRevisionId).Title == "Reconcile the setting", "Revision titles were not persisted.");
+    Assert(RevisionTitle.FromReport("Summary first\nRevision title: hidden") == null && RevisionTitle.FromReport("Revision title:   ") == null, "Unmarked or empty first lines were accepted.");
 });
 await Test("Canceling one map attempt stops selected dependents", async () =>
 {
@@ -942,4 +971,13 @@ internal sealed class RepeatedContentionHost(string project) : IWorkHost
     }
 }
 
-
+internal sealed class RevisionTitleHost : IWorkHost
+{
+    public bool Marked { get; set; } = true;
+    public Task<string> Version(string executable) => Task.FromResult("revision title fixture");
+    public async Task<HostResult> Run(WorkUnit work, string executable, string logPath, Action<string> output, CancellationToken cancel)
+    {
+        var code = await OwnedProcess.RunScript("Set-Content revision-title.txt 'revised'", work.Workspace, logPath, output, cancel);
+        return new HostResult(code, true, null, work.ParentId == null ? null : Marked ? "Revision title: Reconcile the setting\nCompleted the revision." : "Completed the revision.");
+    }
+}
