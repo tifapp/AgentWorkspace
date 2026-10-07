@@ -1,10 +1,11 @@
 ﻿[CmdletBinding()]
 param(
-    [string]$Root = (Split-Path -Parent $PSScriptRoot),
+    [string]$Root = $null,
     [switch]$RequireComplete,
     [switch]$SelfCheck
 )
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($Root)) { $Root = Split-Path -Parent $PSScriptRoot }
 $script:failures = New-Object System.Collections.Generic.List[string]
 function Fail([string]$message) { $script:failures.Add($message) }
 function Need($condition, [string]$message) { if (-not $condition) { Fail $message } }
