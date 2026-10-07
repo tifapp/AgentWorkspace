@@ -98,6 +98,7 @@ public sealed class TaskMapCanvas : UserControl
         SelectionChanged?.Invoke(map.Tasks.FirstOrDefault(x => x.Id == id)); Render();
     }
     public void Refresh() => Render();
+    internal static string TaskStatusLabel(MapTaskStatus value) => value switch { MapTaskStatus.NeedsResponse => "Needs response", MapTaskStatus.Parked => "Parked conflict", MapTaskStatus.Abandoned => "Abandoned conflict", _ => value.ToString() };
     void Render()
     {
         var fromId = (from.SelectedItem as ComboBoxItem)?.Tag as string;
@@ -107,7 +108,7 @@ public sealed class TaskMapCanvas : UserControl
         {
             from.Items.Add(new ComboBoxItem { Content = task.Title, Tag = task.Id });
             to.Items.Add(new ComboBoxItem { Content = task.Title, Tag = task.Id });
-            list.Items.Add(new ListViewItem { Content = task.Title + " � " + task.Status + (task.Selected ? " � selected" : ""), Tag = task.Id });
+            list.Items.Add(new ListViewItem { Content = task.Title + " � " + TaskStatusLabel(task.Status) + (task.Selected ? " � selected" : ""), Tag = task.Id });
         }
         from.SelectedItem = from.Items.OfType<ComboBoxItem>().FirstOrDefault(x => (string)x.Tag == (fromId ?? selected));
         to.SelectedItem = to.Items.OfType<ComboBoxItem>().FirstOrDefault(x => (string)x.Tag == toId);
@@ -121,8 +122,8 @@ public sealed class TaskMapCanvas : UserControl
         foreach (var task in visible)
         {
             var p = Position(task.Id);
-            var node = new Button { Content = collapsed ? task.Title : task.Title + "\n" + task.Status + (task.Selected ? " � selected" : ""), Width = 220, Height = collapsed ? 55 : 84, BorderThickness = new Thickness(selected == task.Id ? 3 : 1) };
-            AutomationProperties.SetName(node, task.Title + ", " + task.Status);
+            var node = new Button { Content = collapsed ? task.Title : task.Title + "\n" + TaskStatusLabel(task.Status) + (task.Selected ? " � selected" : ""), Width = 220, Height = collapsed ? 55 : 84, BorderThickness = new Thickness(selected == task.Id ? 3 : 1) };
+            AutomationProperties.SetName(node, task.Title + ", " + TaskStatusLabel(task.Status));
             node.Click += (_, _) => Select(task.Id);
             node.PointerPressed += (_, e) => { dragging = task.Id; dragStart = e.GetCurrentPoint(graph).Position; };
             node.PointerMoved += (_, e) =>

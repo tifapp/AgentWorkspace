@@ -19,7 +19,7 @@ public sealed class MainWindow : Window
     readonly ScrollViewer detail = new() { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
     readonly StackPanel detailBody = new() { Spacing = 10 }; readonly StackPanel composer = new() { Spacing = 5 }; readonly TextBlock emptyHint = Label("No tasks yet. Describe a change below to start your first task.",13);
     readonly TextBlock projectName = Label("Open a project",18,true), summary = Label("",12); readonly Button projectButton = new(); readonly TextBlock previewBadge = Label("UI preview � sample data",12,true);
-    readonly TextBlock detailHeading = Label("",18,true), detailStatus = Label("",13); TextBox? detailReport; readonly TextBlock liveTranscript = Label("Open to load agent messages.",12); readonly Expander transcriptExpander = new() { Header = "Live transcript" };
+    readonly TextBlock detailHeading = Label("",18,true), detailStatus = Label("",13); TextBox? detailReport; string detailConflictFingerprint=""; readonly TextBlock liveTranscript = Label("Open to load agent messages.",12); readonly Expander transcriptExpander = new() { Header = "Live transcript" };
     readonly Button decisions = new() { Content = "Decisions" };
     readonly InfoBar notice = new() { IsOpen = false, IsClosable = true };
     readonly TextBox prompt = new() { Header = "New task", PlaceholderText = "Describe the change and how to check it", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = 72, MaxHeight = 136 };
@@ -161,7 +161,7 @@ public sealed class MainWindow : Window
         {
             detailPanel.Children.Clear();shownTask=task;
             if(task==null)return;
-            detailPanel.Children.Add(Label("Task details � "+task.Status,15,true));
+            detailPanel.Children.Add(Label("Task details � "+TaskMapCanvas.TaskStatusLabel(task.Status),15,true));
             taskTitle=new TextBox{Header="Task title",Text=task.Title};
             taskPrompt=new TextBox{Header="Task prompt",Text=task.Prompt,AcceptsReturn=true,TextWrapping=TextWrapping.Wrap,MinHeight=75};
             acceptance=new TextBox{Header="Acceptance criteria",Text=task.Acceptance,AcceptsReturn=true,TextWrapping=TextWrapping.Wrap,MinHeight=65};
@@ -268,7 +268,7 @@ public sealed class MainWindow : Window
         Reconcile(tree,state.Work.Where(x=>x.ParentId==null||!rows.ContainsKey(x.ParentId)).Reverse().Select(x=>x.Id).ToArray());
         foreach(var work in state.Work){Reconcile(rows[work.Id].Children,state.Work.Where(x=>x.ParentId==work.Id).Select(x=>x.Id).ToArray());rows[work.Id].UpdateChildren();}
         DispatcherQueue.TryEnqueue(()=>{if(Math.Abs(map.VerticalOffset-scrollOffset)>1)map.ChangeView(null,scrollOffset,null,true);});
-        if(detailsOpen){var shown=state.Work.FirstOrDefault(x=>x.Id==selected);if(shown!=null){detailHeading.Text=shown.StatusLabel+" � "+shown.ShortTask;detailStatus.Text=shown.Detail;if(detailReport!=null&&detailReport.Text!=(shown.CodexReport??""))detailReport.Text=shown.CodexReport??"";}}
+        if(detailsOpen){var shown=state.Work.FirstOrDefault(x=>x.Id==selected);if(shown!=null){if(ConflictFingerprint(state,shown)!=detailConflictFingerprint)DrawDetails();detailHeading.Text=shown.StatusLabel+" � "+shown.ShortTask;detailStatus.Text=shown.Detail;if(detailReport!=null&&detailReport.Text!=(shown.CodexReport??""))detailReport.Text=shown.CodexReport??"";}}
     }
     void Reconcile(StackPanel parent,string[] ids)
     {
@@ -289,10 +289,15 @@ public sealed class MainWindow : Window
         detail.Visibility=detailsOpen?Visibility.Visible:Visibility.Collapsed;
     }
 
+    static string ConflictFingerprint(ProjectState state, WorkUnit work)
+    {
+        var conflicts=state.Conflicts.Where(x=>x.WorkId==work.Id).ToArray();
+        return conflicts.Length==0?"":JsonSerializer.Serialize(new { work.Status, Conflicts=conflicts, Escalations=state.Escalations.Where(x=>x.WorkId==work.Id).ToArray() });
+    }
     void DrawDetails()
     {
         detailBody.Children.Clear();detailReport=null;
-        var work=snapshot?.Work.FirstOrDefault(x=>x.Id==selected);if(work==null)return;
+        var work=snapshot?.Work.FirstOrDefault(x=>x.Id==selected);if(work==null)return; detailConflictFingerprint=ConflictFingerprint(snapshot!,work);
         detailBody.Children.Add(Row(Action("Back",()=>{CloseDetails();return Task.CompletedTask;},"BackToTasks"),Action("Refresh details",()=>{DrawDetails();return Task.CompletedTask;},"RefreshDetails")));
         detailHeading.Text=work.StatusLabel+" � "+work.ShortTask;detailBody.Children.Add(detailHeading);
         detailStatus.Text=work.Detail;detailBody.Children.Add(detailStatus);
@@ -301,6 +306,19 @@ public sealed class MainWindow : Window
         foreach(var child in snapshot!.Work.Where(x=>x.ParentId==work.Id))
             detailBody.Children.Add(Action("Child task � "+child.StatusLabel,()=>{OpenDetails(child.Id);return Task.CompletedTask;},"RevisionTask"));
         detailBody.Children.Add(Card("Full prompt",ReadOnly(work.Task,200))); if(work.IsActive&&!previewMode){var steering=new TextBox{Header="Reply to active task",PlaceholderText="Send guidance to the current turn",AcceptsReturn=true,TextWrapping=TextWrapping.Wrap,MinHeight=65};AutomationProperties.SetAutomationId(steering,"ActiveTaskSteering");detailBody.Children.Add(steering);detailBody.Children.Add(Action("Send steering",async()=>{await Commands.SendSteering(work.Id,steering.Text);steering.Text="";},"SendSteering"));detailBody.Children.Add(transcriptExpander);}
+        foreach(var conflict in snapshot!.Conflicts.Where(x=>x.WorkId==work.Id))
+        {
+            var panel=new StackPanel{Spacing=5};
+            var state=conflict.Abandoned?"Abandoned":conflict.Resolved?"Resolved":conflict.Response==null?"Needs response":"Parked unresolved";
+            panel.Children.Add(Label($"{state} - {conflict.Id}",14,true));
+            panel.Children.Add(ReadOnly($"Cause: {conflict.Cause}\nPaths: {string.Join(", ",conflict.Paths)}\nBase commit: {conflict.BaseCommit}\nCurrent commit: {conflict.CurrentCommit}\nHolder: {conflict.HolderWorkId??"Unknown"}\nRetained candidate: {conflict.DeferredCandidateCommit??"Unknown"}\nResponse: {conflict.Response??"Owed"}\nPublication blocked: {conflict.PublicationBlocked}\nResolution: {conflict.ResolutionExplanation??(conflict.Abandoned?"Abandoned":"Unresolved")}",190));
+            if(!snapshot.Escalations.Any(x=>x.ConflictId==conflict.Id))panel.Children.Add(Label("Human escalation: None",12));
+            foreach(var escalation in snapshot.Escalations.Where(x=>x.ConflictId==conflict.Id))
+                panel.Children.Add(Label("Human escalation: "+escalation.Explanation,12));
+            if(!previewMode&&!conflict.Resolved&&!conflict.Abandoned&&conflict.Response==null&&(work.Status is WorkStatus.NeedsResponse or WorkStatus.Parked))
+                panel.Children.Add(Action("Resume conflict response",async()=>{await Commands.ResumeConflict(work.Id);Refresh();},"ResumeConflictResponse"));
+            detailBody.Children.Add(Card("Conflict",panel));
+        }
         if(!string.IsNullOrWhiteSpace(work.CodexReport)){detailReport=ReadOnly(work.CodexReport,300);detailBody.Children.Add(Card("Full report",detailReport));}
         if(work.ChangedPaths.Count>0)detailBody.Children.Add(Card("Changed files",ReadOnly(string.Join(Environment.NewLine,work.ChangedPaths),160)));
         if(!string.IsNullOrWhiteSpace(work.Diff))detailBody.Children.Add(Card("Candidate diff",ReadOnly(work.Diff,300)));
@@ -322,14 +340,16 @@ public sealed class MainWindow : Window
         void Add(string title,Func<Task> action,string automationId)
         {var item=new MenuFlyoutItem{Text=title};AutomationProperties.SetAutomationId(item,automationId);item.Click+=async(_,_)=>await Guard(action);menu.Items.Add(item);}
         if(previewMode)return menu; if(work.IsActive)Add("Stop task",()=>{Commands.Stop(id);return Task.CompletedTask;},"CancelTask");
-        if(work.Status==WorkStatus.Private)Add("Integrate candidate",()=>Commands.Integrate(id),"IntegrateCandidate");
-        if(!work.IsActive&&work.Status!=WorkStatus.Completed)Add("Revise with Codex",async()=>{selected=await Commands.Revise(id);Refresh();},"ReviseTask");
+        if(snapshot?.Conflicts.Any(x=>x.WorkId==id&&!x.Resolved&&!x.Abandoned)!=true&&work.Status==WorkStatus.Private)Add("Integrate candidate",()=>Commands.Integrate(id),"IntegrateCandidate");
+        if(snapshot?.Conflicts.Any(x=>x.WorkId==id&&!x.Resolved&&!x.Abandoned)!=true&&!work.IsActive&&work.Status!=WorkStatus.Completed)Add("Revise with Codex",async()=>{selected=await Commands.Revise(id);Refresh();},"ReviseTask");
+        if(snapshot?.Conflicts.Any(x=>x.WorkId==id&&!x.Resolved&&!x.Abandoned&&x.Response==null)==true&&(work.Status is WorkStatus.NeedsResponse or WorkStatus.Parked))
+            Add("Resume conflict response",()=>Commands.ResumeConflict(id),"ResumeConflictResponse");
         Add("Interactions",()=>new WorkInteractionsDialog(RequireRuntime(),root.XamlRoot,id).ShowAsync(),"TaskInteractions");
-        if(work.Status==WorkStatus.Completed)Add("Prepare release decision",async()=>{await Commands.PrepareRelease(id);Refresh();},"PrepareRelease");
+        if(snapshot?.Conflicts.Any(x=>x.WorkId==id&&!x.Resolved&&!x.Abandoned)!=true&&work.Status==WorkStatus.Completed)Add("Prepare release decision",async()=>{await Commands.PrepareRelease(id);Refresh();},"PrepareRelease");
         if(Directory.Exists(work.Workspace))Add("Open private files",()=>OpenPath(work.Workspace),"OpenPrivate");
         Add("Open transcript",()=>OpenPath(Commands.Transcript(id)),"OpenTranscript");
         if(File.Exists(Commands.Diagnostics(id)))Add("Runtime diagnostics",()=>OpenPath(Commands.Diagnostics(id)),"OpenDiagnostics");
-        if(!work.IsActive&&!work.WorkspaceRemoved)Add("Clean private files",()=>Commands.Cleanup(id),"CleanupTask");
+        if(snapshot?.Conflicts.Any(x=>x.WorkId==id&&!x.Resolved&&!x.Abandoned)!=true&&!work.IsActive&&!work.WorkspaceRemoved)Add("Clean private files",()=>Commands.Cleanup(id),"CleanupTask");
         return menu;
     }
     void ShowDecisionMenu()

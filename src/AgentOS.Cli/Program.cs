@@ -11,6 +11,10 @@ try
   walkthrough <parent-folder> [data-folder]
   run <project> <validation-command> <task>
   status <project> [data-folder]
+  conflicts <project> [work-id] [data-folder]
+  resume-conflict <project> <work-id> [data-folder]
+  Conflict responses are free form in the same Codex thread. A final answer does not satisfy an owed response.
+  Responses park the retained candidate until explicit resolution or abandonment; no outcome is chosen automatically.
   map-save <project> <json-file> [data-folder] [expected-revision]
   map-list <project> [data-folder]
   map-start <project> <map-id> [data-folder]
@@ -77,6 +81,22 @@ try
         {
             await using var runtime = await ProjectRuntime.OpenAsync(args[1], args.ElementAtOrDefault(2));
             Console.WriteLine(JsonSerializer.Serialize(runtime.Snapshot, JsonFormat.Options)); return 0;
+        }
+        case "conflicts":
+        {
+            var remote = await ProjectClient.ConflictsAsync(args[1], args.ElementAtOrDefault(2));
+            if (remote != null) { Console.WriteLine(JsonSerializer.Serialize(remote, JsonFormat.Options)); return 0; }
+            await using var runtime = await ProjectRuntime.OpenAsync(args[1], args.ElementAtOrDefault(3));
+            var state = runtime.Snapshot; var workId = args.ElementAtOrDefault(2);
+            Console.WriteLine(JsonSerializer.Serialize(new ConflictInspection(state.Conflicts.Where(x => workId == null || x.WorkId == workId).ToArray(), state.Escalations.Where(x => workId == null || x.WorkId == workId).ToArray()), JsonFormat.Options)); return 0;
+        }
+        case "resume-conflict":
+        {
+            var remote = await ProjectClient.ResumeConflictAsync(args[1], args[2]);
+            if (remote != null) { Console.WriteLine(JsonSerializer.Serialize(remote, JsonFormat.Options)); return 0; }
+            await using var runtime = await ProjectRuntime.OpenAsync(args[1], args.ElementAtOrDefault(3));
+            await runtime.ResumeConflictAsync(args[2]);
+            Console.WriteLine(JsonSerializer.Serialize(runtime.Snapshot.Work.Single(x => x.Id == args[2]), JsonFormat.Options)); return 0;
         }
         case "submit":
         {

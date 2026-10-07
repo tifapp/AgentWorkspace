@@ -1,4 +1,4 @@
-﻿using AgentOS.Core;
+using AgentOS.Core;
 namespace AgentOS.App;
 internal static class PreviewData
 {
@@ -14,6 +14,10 @@ internal static class PreviewData
   state.Work.Add(Item("preview-failed","Handle an unavailable log",WorkStatus.Failed,"Validation exited with code 1.","The log could not be opened; retry from the saved candidate."));
   state.Work.Add(Item("preview-private","Review private candidate",WorkStatus.Private,"Candidate is ready for review.","Updated the project summary without integrating it."));
   state.Work.Add(Item("preview-stale","Reconcile old candidate",WorkStatus.Stale,"Base commit changed; revision is needed."));
+  state.Work.Add(Item("preview-response","Reconcile shared settings",WorkStatus.NeedsResponse,"Conflict response owed; candidate retained."));
+  state.Conflicts.Add(new ConflictNotice{Id="preview-conflict",WorkId="preview-response",Cause="Shared path changed during publication",Paths=["src/settings.json"],BaseCommit="base123",CurrentCommit="current456",HolderWorkId="preview-completed",DeferredCandidateCommit="candidate789"});
+  state.Work.Add(Item("preview-parked","Resolve deferred styles",WorkStatus.Parked,"Conflict response recorded; source remains unresolved."));
+  state.Conflicts.Add(new ConflictNotice{Id="preview-parked-conflict",WorkId="preview-parked",Cause="Conflicting style edit",Paths=["src/styles.css"],BaseCommit="base123",CurrentCommit="current456",DeferredCandidateCommit="candidate888",Response="Coordinate the style changes."});
   state.Work.Add(Item("preview-unknown","Recover interrupted task",WorkStatus.Unknown,"The prior host result is unknown."));
   state.Work[0].ChangedPaths.Add("src/AgentOS.App/MainWindow.cs");state.Work[0].Diff="diff --git a/MainWindow.cs b/MainWindow.cs\n+Use a compact header and stable detail pane.";
   state.Work[0].Evidence.Add(new ValidationEvidence{Commit="abc123456789",Tree="def987654321",AgainstCommit="000111222333",Command=".\\scripts\\ValidateCompactUi.ps1",Environment="Windows PowerShell",ExitCode=0,SourceUnchanged=true});

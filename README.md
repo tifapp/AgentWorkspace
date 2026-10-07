@@ -25,8 +25,13 @@ On a fresh practice project, **Run concurrency check** launches three real Codex
 
 **Coverage:** managed PowerShell, private Git, shared publication, owned process trees, loopback previews and the shared evidence database. External services and unmanaged programs are not mediated. Read [the enforcement and recovery contract](docs/guarantees.md).
 
-The packaged `cli/AgentOS.Cli.exe` supports `doctor`, `practice`, `run`, `status` and `walkthrough`. A `run` launch attaches to an already open project's desktop runtime, retaining its validation policy and evidence. Example: `& .\cli\AgentOS.Cli.exe run 'C:\project' '& .\Validate.ps1' 'Describe the change'`.
+The packaged `cli/AgentOS.Cli.exe` supports doctor, practice, run, status, conflicts, resume-conflict and walkthrough. A `run` launch attaches to an already open project's desktop runtime, retaining its validation policy and evidence. Example: `& .\cli\AgentOS.Cli.exe run 'C:\project' '& .\Validate.ps1' 'Describe the change'`.
 
+## Conflict responses
+
+When publication detects a conflict, the task becomes **Needs response** and retains its private candidate. Task details show the exact cause and paths, base and current shared commits, known holder, candidate commit, response, state, and human escalation. Use **Resume conflict response** in task details, or cli/AgentOS.Cli.exe resume-conflict <project> <work-id>, to continue the same Codex thread. cli/AgentOS.Cli.exe conflicts <project> [work-id] [data-folder] inspects conflict notices and escalations, including while Desktop owns the open project.
+
+The agent must answer the notice with a free form explanation through respond_to_conflict; a final message does not satisfy an owed response. It can coordinate with the holder through a peer message or exact force-interrupt, request publication of reconciled source, explicitly abandon deferred work, or escalate to a human when the cause cannot be reconciled with its task. There is no fixed response menu or automatic choice. A response alone leaves the candidate parked and unpublished until resolution or abandonment is recorded. Unrelated tasks continue normally.
 ## Build and verify
 
 ```powershell

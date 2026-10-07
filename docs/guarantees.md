@@ -20,6 +20,9 @@ Ownership release is not evidence of effect success. Project history separately 
 
 The CLI can launch into an already open desktop runtime through a current-user-only named pipe. Stable launch request identities deduplicate retries, including after restart. A launch cannot change the owning runtime's validation policy. Different projects retain independent runtimes and share the same machine coordinator. The machine diagnostic journal retains its most recent 512 outcomes; durable project evidence is separate.
 
+## Conflict response and retained candidates
+
+A conflicting publication records the exact cause, affected paths, base and current shared commits, known holder, and retained candidate. The work enters **Needs response**. The same Codex thread must be resumed to give a free form respond_to_conflict explanation; a final answer while that response is owed is blocked. The agent can coordinate through a peer message or exact force-interrupt, request validated publication after reconciling source, abandon deferred work explicitly, or escalate to a human when the cause cannot be reconciled with its task. No outcome is selected automatically. A recorded response without resolution leaves the candidate **Parked** and unpublished. Desktop detail and CLI conflicts show the response, unresolved or abandoned state, and escalations. Normal independent work remains available.
 ## Scope and limitations
 
 This is a managed workflow runtime, not a general Windows reference monitor. A regular AppContainer retains access to Windows-granted platform resources, including its package profile and some operating-system caches. Tests prove refusal of an outside project write and a direct connection to an actual listening socket. They do not establish absence of every possible Windows vulnerability or side channel.

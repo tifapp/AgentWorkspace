@@ -29,7 +29,7 @@ internal sealed class ProjectBroker : IAsyncDisposable
                     var line = await reader.ReadLineAsync(timeout.Token) ?? throw new IOException("Empty project request.");
                     if (line.Length > 200000) throw new ArgumentException("Project request is too large.");
                     var request = JsonSerializer.Deserialize<BrokerRequest>(line, JsonFormat.Options) ?? throw new IOException("Invalid project request.");
-                    WorkUnit? work = null; IReadOnlyList<TaskMap>? maps = null; IReadOnlyList<string>? started = null; IReadOnlyList<TaskInteraction>? interactions = null; TaskInteraction? interaction = null;
+                    WorkUnit? work = null; IReadOnlyList<TaskMap>? maps = null; IReadOnlyList<string>? started = null; IReadOnlyList<TaskInteraction>? interactions = null; TaskInteraction? interaction = null; IReadOnlyList<ConflictNotice>? conflicts = null; IReadOnlyList<HumanEscalation>? escalations = null;
                     switch (request.Operation)
                     {
                         case "start":
@@ -39,6 +39,13 @@ internal sealed class ProjectBroker : IAsyncDisposable
                             var id = await _runtime.StartAsync(request.Task ?? "", externalRequestId: request.RequestId);
                             work = _runtime.Snapshot.Work.Single(x => x.Id == id); break;
                         case "work": work = _runtime.Snapshot.Work.Single(x => x.Id == request.WorkId); break;
+                        case "inspect-conflicts":
+                            var state = _runtime.Snapshot;
+                            conflicts = state.Conflicts.Where(x => request.WorkId == null || x.WorkId == request.WorkId).ToArray();
+                            escalations = state.Escalations.Where(x => request.WorkId == null || x.WorkId == request.WorkId).ToArray(); break;
+                        case "resume-conflict":
+                            _ = _runtime.ResumeConflictAsync(request.WorkId!);
+                            work = _runtime.Snapshot.Work.Single(x => x.Id == request.WorkId); break;
                         case "cancel": _runtime.Cancel(request.WorkId!); work = _runtime.Snapshot.Work.Single(x => x.Id == request.WorkId); break;
                         case "map-save":
                             if (request.Map == null) throw new ArgumentException("A map is required.");
@@ -61,7 +68,7 @@ internal sealed class ProjectBroker : IAsyncDisposable
                         case "cancel-wait": interaction = _runtime.CancelWait(request.WorkId!, request.InteractionId!); break;
                         default: throw new UnauthorizedAccessException("Unsupported project request.");
                     }
-                    response = JsonSerializer.Serialize(new BrokerResponse(work, null, maps, started, interactions, interaction), Wire);
+                    response = JsonSerializer.Serialize(new BrokerResponse(work, null, maps, started, interactions, interaction, conflicts, escalations), Wire);
                 }
                 catch (Exception e) { response = JsonSerializer.Serialize(new BrokerResponse(null, e.Message), Wire); }
                 await writer.WriteLineAsync(response.AsMemory(), timeout.Token);
@@ -78,6 +85,13 @@ public static class ProjectClient
         => (await Call(project, new("start", task, requestId, null, validation), cancel))?.Work;
     public static async Task<WorkUnit?> InspectAsync(string project, string id, CancellationToken cancel = default)
         => (await Call(project, new("work", null, null, id, null), cancel))?.Work;
+    public static async Task<ConflictInspection?> ConflictsAsync(string project, string? workId = null, CancellationToken cancel = default)
+    {
+        var response = await Call(project, new("inspect-conflicts", null, null, workId, null), cancel);
+        return response == null ? null : new ConflictInspection(response.Conflicts ?? [], response.Escalations ?? []);
+    }
+    public static async Task<WorkUnit?> ResumeConflictAsync(string project, string workId, CancellationToken cancel = default)
+        => (await Call(project, new("resume-conflict", null, null, workId, null), cancel))?.Work;
     public static async Task<WorkUnit?> CancelAsync(string project, string id, CancellationToken cancel = default)
         => (await Call(project, new("cancel", null, null, id, null), cancel))?.Work;
     public static async Task<IReadOnlyList<TaskMap>?> MapsAsync(string project, CancellationToken cancel = default) => (await Call(project, new("map-list", null, null, null, null), cancel))?.Maps;
@@ -119,4 +133,5 @@ public static class ProjectClient
     }
 }
 internal sealed record BrokerRequest(string Operation, string? Task, string? RequestId, string? WorkId, string? Validation, TaskMap? Map = null, long? ExpectedRevision = null, string? InteractionId = null, string? Text = null, string? TargetId = null, WaitKind? WaitKind = null, DateTimeOffset? Deadline = null);
-internal sealed record BrokerResponse(WorkUnit? Work, string? Error, IReadOnlyList<TaskMap>? Maps = null, IReadOnlyList<string>? Started = null, IReadOnlyList<TaskInteraction>? Interactions = null, TaskInteraction? Interaction = null);
+public sealed record ConflictInspection(IReadOnlyList<ConflictNotice> Conflicts, IReadOnlyList<HumanEscalation> Escalations);
+internal sealed record BrokerResponse(WorkUnit? Work, string? Error, IReadOnlyList<TaskMap>? Maps = null, IReadOnlyList<string>? Started = null, IReadOnlyList<TaskInteraction>? Interactions = null, TaskInteraction? Interaction = null, IReadOnlyList<ConflictNotice>? Conflicts = null, IReadOnlyList<HumanEscalation>? Escalations = null);

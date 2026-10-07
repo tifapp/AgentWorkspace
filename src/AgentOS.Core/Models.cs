@@ -54,7 +54,7 @@ public sealed class WorkUnit
     public Dictionary<string, string> PublishedPathObjects { get; set; } = new(StringComparer.Ordinal);
     public string Diff { get; set; } = "";
     public List<ValidationEvidence> Evidence { get; set; } = [];
-    public string StatusLabel => Status == WorkStatus.Private ? "Private candidate" : Status.ToString();
+    public string StatusLabel => Status switch { WorkStatus.Private => "Private candidate", WorkStatus.NeedsResponse => "Needs response", WorkStatus.Parked => "Parked conflict", WorkStatus.Abandoned => "Abandoned conflict", _ => Status.ToString() };
     public string ShortTask => (Title ?? Task).Length <= 110 ? Title ?? Task : (Title ?? Task)[..107] + "…";
     public bool IsActive => Status is WorkStatus.Preparing or WorkStatus.Running or WorkStatus.Waiting or WorkStatus.Validating;
 }
