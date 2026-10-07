@@ -13,6 +13,8 @@ public sealed partial class ProjectRuntime
 {
  string SettingsFile=>Path.Combine(_store.Root,"external-effects-settings.json");
  EffectIntentJournal Journal=>new(Path.Combine(_store.Root,"external-effects"));
+ public void ConfigureExecutionProfile(ExecutionProfile profile)=>new ExecutionProfileRegistry(_store.Root).Configure(profile);
+ public ExecutionProfileDescription DescribeExecutionProfile()=>new ExecutionProfileRegistry(_store.Root).Describe();
  public ExternalEffectSettings ExternalSettings=>File.Exists(SettingsFile)?JsonSerializer.Deserialize<ExternalEffectSettings>(File.ReadAllText(SettingsFile))??new():new();
  public void ConfigureExternalEffects(ExternalEffectSettings settings)
  {
@@ -83,9 +85,16 @@ public sealed partial class ProjectRuntime
  {
   "github" when ExternalSettings.GitHub is { } g=>new GitHubEffects(Journal,new PersistedGitHubCredentials(),transport,[g.ApiOrigin]),
   "postgresql" when ExternalSettings.PostgreSql is { } p=>new PostgreSqlEffects(Journal,connection??PgConnection(p)),
-  "deployment" when ExternalSettings.Deployment!=null=>new DeploymentEffects(Journal,executor),
+  "deployment" when ExternalSettings.Deployment is { } d=>new DeploymentEffects(Journal,executor??ConfiguredDeploymentExecutor(d)),
   _=>throw new InvalidOperationException(kind+" provider is not configured.")
  };
+ IIsolatedDeploymentExecutor? ConfiguredDeploymentExecutor(DeploymentEffectSettings d)
+ {
+  if(d.Backend!="hyperv")return null;
+  HyperVProfile? profile;
+  try{profile=new ExecutionProfileRegistry(_store.Root).Current.HyperV;}catch{return null;}
+  return profile==null?null:new HyperVExecution(_store.Root,profile,d,commit=>Blob(commit,d.ArtifactPath));
+ }
  static Func<DbConnection>? PgConnection(PostgreSqlEffectSettings p)
  {var(factory,_)=PostgreSqlProvider.Discover();if(factory==null)return null;var b=new DbConnectionStringBuilder{["Host"]=p.Host,["Port"]=p.Port,["Database"]=p.Database,["Username"]=p.User,["Integrated Security"]=true,["Pooling"]=false};return PostgreSqlProvider.ConnectionFactory(factory,b.ConnectionString);}
  async Task<T> Guard<T>(Func<Task<T>> f,CancellationToken ct){await _publication.WaitAsync(ct);try{return await f();}finally{_publication.Release();}}
