@@ -24,11 +24,13 @@ public partial class App : Application
         {
             _capture = new CaptureController(_window);
             ((MainWindow)_window).Capture = _capture;
-            _notifications = new NotificationController((MainWindow)_window, _capture);
+            try { _notifications = new NotificationController((MainWindow)_window, _capture); _notifications.NavigateNotice = ((MainWindow)_window).NavigateNotice; }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException or System.Text.Json.JsonException) { ((MainWindow)_window).ShowNotificationStatus("Notification history is unavailable."); }
         }
         _window.Activate();
     }
 }
+
 
 
 

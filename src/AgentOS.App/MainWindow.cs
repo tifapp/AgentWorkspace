@@ -30,7 +30,7 @@ public sealed class MainWindow : Window
     DispatcherTimer? previewUpdateTimer;
     readonly Dictionary<string, TaskRow> rows = new();
     readonly string settings = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"AgentOS","desktop.json");
-    ProjectRuntime? runtime; ProjectState? snapshot; string? dataRoot, selected; internal CaptureController? Capture { get; set; }
+    ProjectRuntime? runtime; ProjectState? snapshot; string? dataRoot, selected; internal CaptureController? Capture { get; set; } internal ProjectRuntime? NotificationRuntime => runtime;
     long generation = -1; bool closing, detailsOpen, wide, walkthrough, previewUpdated, previewEmpty; readonly bool previewMode = Environment.GetCommandLineArgs().Contains("--ui-preview"); string? selectedBeforeDetails;
 
     public MainWindow()
@@ -125,6 +125,7 @@ public sealed class MainWindow : Window
         body.Children.Add(Action("Check prerequisites",async()=>{checks.Children.Clear();foreach(var c in await HostDiscovery.CheckAsync())checks.Children.Add(Label((c.Ready?"Ready: ":"Action needed: ")+c.Name+" � "+c.Detail,12));},"CheckPrerequisites"));
         var advanced=new StackPanel{Spacing=8};
         advanced.Children.Add(Label(ProjectRuntime.Coverage,12));
+        advanced.Children.Add(Action("Notification preferences and history",async()=>{settingsDialog?.Hide();await closed.Task;if(NotificationController.Current is { } notifications)notifications.ShowHistory();else ShowNotificationStatus("Notifications are unavailable.");},"NotificationHistory"));
         advanced.Children.Add(Action("Maps",async()=>{settingsDialog?.Hide();await closed.Task;await ShowMaps();},"TaskMaps"));
         advanced.Children.Add(Action("Capture context into map",async()=>{if(Capture==null)throw new InvalidOperationException("Capture is unavailable.");settingsDialog?.Hide();await closed.Task;await Capture.OpenAsync();},"CaptureNewMap"));
         advanced.Children.Add(Action("Work interactions",async()=>{settingsDialog?.Hide();await closed.Task;await new WorkInteractionsDialog(RequireRuntime(),root.XamlRoot).ShowAsync();},"WorkInteractions"));
@@ -394,6 +395,25 @@ public sealed class MainWindow : Window
      if(Directory.Exists(path))Process.Start(new ProcessStartInfo(path){UseShellExecute=true});
      else{var editor=new ProcessStartInfo("notepad.exe"){UseShellExecute=false};editor.ArgumentList.Add(path);Process.Start(editor);}
      return Task.CompletedTask;}
+    internal void ShowNotificationStatus(string message)=>Notice("Notification",message);
+    internal bool NavigateNotice(LocalNotice item)
+    {
+        var active=runtime;
+        if(previewMode||active==null||!string.Equals(active.Snapshot.ProjectPath,item.Project,StringComparison.OrdinalIgnoreCase))return false;
+        Refresh();var state=active.Snapshot;
+        if(item.Identity.StartsWith("effect:",StringComparison.Ordinal))
+        {if(item.DecisionId==null||item.Identity!="effect:"+item.DecisionId||active.InspectExternalEffect(item.DecisionId)?.State!=ExternalEffectState.Prepared)return false;_ = Guard(()=>ExternalEffectsDialog.OpenAsync(active));return true;}
+        if(item.WorkId==null)return false;
+        var work=state.Work.FirstOrDefault(x=>x.Id==item.WorkId);if(work==null)return false;
+        if(item.Identity.StartsWith("decision:",StringComparison.Ordinal))
+        {if(!state.Decisions.Any(x=>x.Id==item.DecisionId&&x.WorkId==work.Id&&x.Status==DecisionStatus.Pending&&item.Identity=="decision:"+x.Id))return false;OpenDetails(work.Id);_ = Guard(()=>ShowDecision(item.DecisionId!));return true;}
+        if(item.Identity.StartsWith("interaction:",StringComparison.Ordinal))
+        {if(item.DecisionId==null||!active.InspectInteractions().Any(x=>x.Id==item.DecisionId&&x.Status==InteractionStatus.Pending&&(!x.Deadline.HasValue||x.Deadline>DateTimeOffset.UtcNow)&&item.Identity=="interaction:"+x.Kind+":"+x.Id&&item.WorkId==(x.Kind==InteractionKind.Peer?x.TargetWorkId:x.WorkId)&&(x.Kind is InteractionKind.Clarification or InteractionKind.Peer or InteractionKind.Followup||x.Kind==InteractionKind.Obligation&&x.Required)))return false;OpenDetails(work.Id);_ = Guard(()=>new WorkInteractionsDialog(active,root.XamlRoot,work.Id).ShowAsync());return true;}
+        if(item.Identity.StartsWith("conflict:",StringComparison.Ordinal))
+        {if(!state.Conflicts.Any(x=>x.Id==item.DecisionId&&x.WorkId==work.Id&&!x.Resolved&&!x.Abandoned&&x.Response==null&&item.Identity=="conflict:"+x.Id)||work.Status is not (WorkStatus.NeedsResponse or WorkStatus.Parked))return false;OpenDetails(work.Id);return true;}
+        if(item.Identity!=$"work:{work.Id}:{work.Status}:{work.UpdatedAt.UtcTicks}"||work.Status.ToString()!=item.Kind)return false;
+        OpenDetails(work.Id);return true;
+    }
     void Notice(string title,string message,bool error=false)
     {notice.Title=title;notice.Message=message;notice.Severity=error?InfoBarSeverity.Error:InfoBarSeverity.Informational;notice.IsOpen=true;}
     async Task Guard(Func<Task> action)
@@ -412,6 +432,9 @@ public sealed class MainWindow : Window
     static Border Card(string title,UIElement content)
     {var stack=new StackPanel{Spacing=5};stack.Children.Add(Label(title,13,true));stack.Children.Add(content);return new Border{Child=stack,Padding=new Thickness(10),CornerRadius=new CornerRadius(6),BorderThickness=new Thickness(1),Background=Application.Current.Resources["CardBackgroundFillColorDefaultBrush"] as Brush,BorderBrush=Application.Current.Resources["CardStrokeColorDefaultBrush"] as Brush};}
 }
+
+
+
 
 
 

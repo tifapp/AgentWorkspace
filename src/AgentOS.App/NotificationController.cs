@@ -1,6 +1,7 @@
 using AgentOS.Core;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -38,14 +39,12 @@ public sealed class NotificationController:IDisposable
  public bool TryHideOnClosing()
  {if(!keepRunning||!iconAdded||exiting)return false;window.AppWindow.Hide();return true;}
  void RefreshProject()
- {if(disposed)return;try{var settings=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"AgentOS","desktop.json");
-   if(!File.Exists(settings))return;using var file=new FileStream(settings,FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete);using var doc=JsonDocument.Parse(file);
-   var project=doc.RootElement.TryGetProperty("project",out var p)?p.GetString():null;var root=doc.RootElement.TryGetProperty("dataRoot",out var r)?r.GetString():null;
-   if(string.Equals(selectedProject,project,StringComparison.OrdinalIgnoreCase)&&string.Equals(selectedRoot,root,StringComparison.OrdinalIgnoreCase))return;
-   selectedProject=project;selectedRoot=root;watcher.Select(project,root);
-  }catch(Exception e)when(e is IOException or UnauthorizedAccessException or JsonException){}}
+ {if(disposed)return;try{var active=window.NotificationRuntime;var project=active?.Snapshot.ProjectPath;var dir=active?.DataDirectory;
+   if(string.Equals(selectedProject,project,StringComparison.OrdinalIgnoreCase)&&string.Equals(selectedRoot,dir,StringComparison.OrdinalIgnoreCase))return;
+   watcher.Select(project,null,dir);selectedProject=project;selectedRoot=dir;
+  }catch(Exception e)when(e is IOException or UnauthorizedAccessException or InvalidDataException or JsonException){window.ShowNotificationStatus("Notification scanning is unavailable.");}}
  void Deliver(LocalNotice notice)
- {if(disposed||!iconAdded||!center.Enabled||center.IsQuiet(DateTimeOffset.UtcNow)||!watcher.IsCurrent(notice))return;var data=BaseIcon();data.uFlags=NifInfo;data.szInfoTitle="Agent OS - "+notice.Kind;data.szInfo=notice.Title;data.dwInfoFlags=1;if(Shell_NotifyIcon(NimModify,ref data)){lastBalloon=notice;center.MarkDelivered(notice);}}
+ {try{if(disposed||!iconAdded||!center.Enabled||center.IsQuiet(DateTimeOffset.UtcNow)||!watcher.IsCurrent(notice))return;var data=BaseIcon();data.uFlags=NifInfo;data.szInfoTitle="Agent OS - "+notice.Kind;data.szInfo=notice.Title;data.dwInfoFlags=1;if(Shell_NotifyIcon(NimModify,ref data)){lastBalloon=notice;center.MarkDelivered(notice);}}catch(Exception e)when(e is IOException or UnauthorizedAccessException or InvalidDataException or JsonException){window.ShowNotificationStatus("Notification delivery is unavailable.");}}
  void AddIcon()
  {var data=BaseIcon();data.uFlags=NifMessage|NifIcon|NifTip;iconAdded=Shell_NotifyIcon(NimAdd,ref data);if(iconAdded){data.uVersion=4;Shell_NotifyIcon(NimSetVersion,ref data);}}
  NOTIFYICONDATA BaseIcon()=>new(){cbSize=(uint)Marshal.SizeOf<NOTIFYICONDATA>(),hWnd=hwnd,uID=IconId,uCallbackMessage=Callback,hIcon=LoadIcon(0,(nint)32512),szTip="Agent OS",szInfo="",szInfoTitle=""};
@@ -65,22 +64,23 @@ public sealed class NotificationController:IDisposable
    switch(result){case 1:ShowWorkspace();break;case 2:ShowWorkspace();_=capture.OpenAsync();break;case 3:ShowHistory();break;case 4:keepRunning=iconAdded&&!keepRunning;SavePreferences();break;case 5:StopExit();break;}
   }finally{DestroyMenu(menu);}}
  public void ShowHistory()
- {if(historyWindow!=null){historyWindow.Activate();return;}
+ {try{if(historyWindow!=null){historyWindow.Activate();return;}
   var history=new Window{Title="Notification history"};history.AppWindow.Resize(new Windows.Graphics.SizeInt32(600,500));
   var panel=new StackPanel{Spacing=8,Padding=new Thickness(16)};var heading=new TextBlock{Text="Notification history",FontSize=22};AutomationProperties.SetHeadingLevel(heading,AutomationHeadingLevel.Level1);panel.Children.Add(heading);
-  var enabled=new CheckBox{Content="Show desktop notifications",IsChecked=center.Enabled};AutomationProperties.SetName(enabled,"Show desktop notifications");enabled.Checked+=(_,_)=>center.ConfigureEnabled(true);enabled.Unchecked+=(_,_)=>center.ConfigureEnabled(false);panel.Children.Add(enabled);
+  var enabled=new CheckBox{Content="Show desktop notifications",IsChecked=center.Enabled};AutomationProperties.SetName(enabled,"Show desktop notifications");enabled.Checked+=(_,_)=>TryHistory(()=>center.ConfigureEnabled(true));enabled.Unchecked+=(_,_)=>TryHistory(()=>center.ConfigureEnabled(false));panel.Children.Add(enabled);
   var quiet=new StackPanel{Orientation=Orientation.Horizontal,Spacing=8};
   var from=new TextBox{Text=center.QuietFrom.ToString("HH:mm"),Width=80,PlaceholderText="HH:mm"};AutomationProperties.SetName(from,"Quiet hours start");
   var until=new TextBox{Text=center.QuietUntil.ToString("HH:mm"),Width=80,PlaceholderText="HH:mm"};AutomationProperties.SetName(until,"Quiet hours end");
   var saveQuiet=new Button{Content="Save quiet hours"};AutomationProperties.SetName(saveQuiet,"Save quiet hours");
-  var quietStatus=new TextBlock();saveQuiet.Click+=(_,_)=>{if(TimeOnly.TryParseExact(from.Text,"HH:mm",out var startTime)&&TimeOnly.TryParseExact(until.Text,"HH:mm",out var endTime)){center.ConfigureQuietHours(startTime,endTime);quietStatus.Text="Quiet hours saved.";}else quietStatus.Text="Enter times as HH:mm.";};
+  var quietStatus=new TextBlock();saveQuiet.Click+=(_,_)=>{if(TimeOnly.TryParseExact(from.Text,"HH:mm",out var startTime)&&TimeOnly.TryParseExact(until.Text,"HH:mm",out var endTime)){quietStatus.Text=TryHistory(()=>center.ConfigureQuietHours(startTime,endTime))?"Quiet hours saved.":"Quiet hours could not be saved.";}else quietStatus.Text="Enter times as HH:mm.";};
   quiet.Children.Add(from);quiet.Children.Add(until);quiet.Children.Add(saveQuiet);panel.Children.Add(quiet);panel.Children.Add(quietStatus);
   var filter=new ComboBox{Header="Filter history",SelectedIndex=0};foreach(var label in new[]{"All","Needs attention","Task updates"})filter.Items.Add(label);AutomationProperties.SetName(filter,"Filter notification history");panel.Children.Add(filter);
   var list=new StackPanel{Spacing=6};panel.Children.Add(list);
-  void Render(){list.Children.Clear();var notices=center.History.Reverse().Where(n=>filter.SelectedIndex switch{1=>n.DecisionId!=null,2=>n.DecisionId==null,_=>true}).ToArray();if(notices.Length==0){list.Children.Add(new TextBlock{Text="No notifications in this filter."});return;}foreach(var notice in notices){var label=$"{notice.At.ToLocalTime():g} - {notice.Kind} - {notice.Title}";var button=new Button{Content=label,HorizontalAlignment=HorizontalAlignment.Stretch,HorizontalContentAlignment=HorizontalAlignment.Left};AutomationProperties.SetName(button,label);button.Click+=(_,_)=>OpenNotice(notice);list.Children.Add(button);}}
-  filter.SelectionChanged+=(_,_)=>Render();Render();history.Content=new ScrollViewer{Content=panel,VerticalScrollBarVisibility=ScrollBarVisibility.Auto};history.Closed+=(_,_)=>historyWindow=null;historyWindow=history;history.Activate();}
+  void Render(){list.Children.Clear();IReadOnlyList<LocalNotice> saved;try{saved=center.History;}catch(Exception e)when(e is IOException or UnauthorizedAccessException or InvalidDataException or JsonException){list.Children.Add(new TextBlock{Text="Notification history is unavailable."});return;}var notices=saved.Reverse().Where(n=>filter.SelectedIndex switch{1=>n.DecisionId!=null,2=>n.DecisionId==null,_=>true}).ToArray();if(notices.Length==0){list.Children.Add(new TextBlock{Text="No notifications in this filter."});return;}foreach(var notice in notices){var label=$"{notice.At.ToLocalTime():g} - {notice.Kind} - {notice.Title}";var button=new Button{Content=label,HorizontalAlignment=HorizontalAlignment.Stretch,HorizontalContentAlignment=HorizontalAlignment.Left};AutomationProperties.SetName(button,label);button.Click+=(_,_)=>OpenNotice(notice);list.Children.Add(button);}}
+  filter.SelectionChanged+=(_,_)=>Render();Render();history.Content=new ScrollViewer{Content=panel,VerticalScrollBarVisibility=ScrollBarVisibility.Auto};history.Closed+=(_,_)=>historyWindow=null;historyWindow=history;history.Activate();}catch(Exception e)when(e is IOException or UnauthorizedAccessException or InvalidDataException or JsonException){window.ShowNotificationStatus("Notification history is unavailable.");}}
+ bool TryHistory(Action action){try{action();return true;}catch(Exception e)when(e is IOException or UnauthorizedAccessException or InvalidDataException or JsonException){window.ShowNotificationStatus("Notification settings could not be saved.");return false;}}
  void OpenNotice(LocalNotice notice)
- {ShowWorkspace();if(!watcher.IsCurrent(notice))return;NavigateNotice?.Invoke(notice);}
+ {ShowWorkspace();try{if(!watcher.IsCurrent(notice)||NavigateNotice?.Invoke(notice)!=true)window.ShowNotificationStatus("This notification is no longer available in the current project.");}catch(Exception e)when(e is IOException or UnauthorizedAccessException or InvalidDataException or JsonException){window.ShowNotificationStatus("This notification is no longer available in the current project.");}}
  public void Dispose()
  {if(disposed)return;disposed=true;if(ReferenceEquals(Current,this))Current=null;settingsTimer.Dispose();watcher.Dispose();historyWindow?.Close();
   if(iconAdded){var data=BaseIcon();Shell_NotifyIcon(NimDelete,ref data);iconAdded=false;}
@@ -106,6 +106,9 @@ public sealed class NotificationController:IDisposable
  [DllImport("user32.dll")]static extern bool GetCursorPos(out POINT point);
  [DllImport("user32.dll")]static extern bool SetForegroundWindow(nint hwnd);
 }
+
+
+
 
 
 

@@ -1,13 +1,12 @@
 using AgentOS.Core;
-using System.Runtime.CompilerServices;
+
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 namespace AgentOS.Tests;
 internal static class NotificationDeliveryChecks
 {
- [ModuleInitializer] internal static void Run()
- {var root=Path.Combine(Environment.CurrentDirectory,"agentos-notification-fixture-"+Guid.NewGuid().ToString("N"));try{Exercise(root);}finally{try{Directory.Delete(root,true);}catch(IOException){}}}
+ internal static Task RunAsync(string root) {Directory.CreateDirectory(root);Exercise(root);return Task.CompletedTask;}
  static void Check(bool yes,string message){if(!yes)throw new Exception("Notification fixture: "+message);}
  static void Exercise(string root)
  {var projectA=Path.Combine(root,"project-a");var projectB=Path.Combine(root,"project-b");Directory.CreateDirectory(projectA);Directory.CreateDirectory(projectB);var data=Path.Combine(root,"data");
@@ -28,6 +27,18 @@ internal static class NotificationDeliveryChecks
   center.ConfigureQuietHours(TimeOnly.FromDateTime(DateTime.Now.AddHours(1)),TimeOnly.FromDateTime(DateTime.Now.AddHours(2)));watcher.Scan();Check(seen.Count==2,"quiet request popped later");
   var decision=new HumanDecision{Id="decision-four",WorkId="same-work",Status=DecisionStatus.Pending};State(b,projectB,decision);watcher.Scan();Check(seen.Count==3&&seen.Last().DecisionId==decision.Id,"decision not notified");
   var effects=Path.Combine(b,"external-effects");Directory.CreateDirectory(effects);var scope=new EffectScope("fixture","candidate","evidence","artifact","command","environment","destination","operation","{}");File.WriteAllText(Path.Combine(effects,"intent.json"),JsonSerializer.Serialize(new EffectIntent("effect-five",scope,ExternalEffectState.Prepared,null,null,"",DateTimeOffset.UtcNow),JsonFormat.Options));watcher.Scan();Check(seen.Count==4&&watcher.IsCurrent(seen.Last()),"external review not notified");
-  File.WriteAllText(Path.Combine(b,"interactions.json"),"{\"Schema\":2,\"Items\":[]}");watcher.Scan();Check(!watcher.IsCurrent(seen[1]),"unsupported journal accepted");center.ConfigureEnabled(false);Check(!new NotificationCenter(Path.Combine(root,"history.json")).Enabled,"preference not durable");
+  var conflict=new ConflictNotice{Id="conflict-six",WorkId="same-work",Cause="TouchedPathChanged"};
+  File.WriteAllText(Path.Combine(b,"state.json"),JsonSerializer.Serialize(new ProjectState{ProjectPath=Path.GetFullPath(projectB),Work=[new WorkUnit{Id="same-work",Status=WorkStatus.NeedsResponse}],Decisions=[decision],Conflicts=[conflict]},JsonFormat.Options));
+  watcher.Scan();Check(seen.Count==5&&seen.Last().Identity=="conflict:"+conflict.Id&&watcher.IsCurrent(seen.Last()),"conflict not notified");
+  conflict.Response="handled";File.WriteAllText(Path.Combine(b,"state.json"),JsonSerializer.Serialize(new ProjectState{ProjectPath=Path.GetFullPath(projectB),Work=[new WorkUnit{Id="same-work",Status=WorkStatus.Parked}],Decisions=[decision],Conflicts=[conflict]},JsonFormat.Options));
+  Check(!watcher.IsCurrent(seen[4]),"answered conflict remained clickable");
+  File.WriteAllText(Path.Combine(b,"interactions.json"),"{\"Schema\":2,\"Items\":[]}");watcher.Scan();Check(!watcher.IsCurrent(seen[1]),"unsupported journal accepted");
+  Parallel.For(0,48,i=>{var other=new NotificationCenter(Path.Combine(root,"history.json"));other.Record("parallel:"+i,projectB,"same-work",null,"Test","Concurrent history");other.Record("shared",projectB,"same-work",null,"Test","Deduplicated history");});
+  Check(center.History.Count(x=>x.Identity.StartsWith("parallel:",StringComparison.Ordinal))==48&&center.History.Count(x=>x.Identity=="shared")==1,"concurrent history lost or duplicated");
+  center.ConfigureEnabled(false);Check(!new NotificationCenter(Path.Combine(root,"history.json")).Enabled,"preference not durable");
  }
 }
+
+
+
+
