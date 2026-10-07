@@ -2,44 +2,45 @@ using AgentOS.Core;
 using System.Collections;
 using System.Data;
 using System.Data.Common;
+using System.Diagnostics.CodeAnalysis;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 namespace AgentOS.Tests;
 public static partial class ExternalDeliveryChecks
 {
- static async Task DatabaseDeliveryAsync()
+ static async Task DatabaseDeliveryAsync(string artifactsRoot)
  {
   var state=new FakeDatabase();var sql="CREATE TABLE approved.items (id integer DEFAULT 'COMMIT');";state.Hash=Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sql)));
   var identity=Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes("fixture:5432\nfixture")));
   Check(PostgreSqlProvider.EndpointIdentity("FIXTURE",5432,"fixture")==identity,"Canonical endpoint identity changed");
   var spec=new PostgreSqlMigration(identity,"approved","001",sql,state.Hash,"fixture_role",true);
   var scope=new EffectScope("postgresql",new string('a',40),new string('B',64),new string('C',64),state.Hash,new string('E',64),identity,"migration",JsonSerializer.Serialize(spec));
-  var root=Path.Combine(Path.GetTempPath(),"agentos-db-delivery-"+Guid.NewGuid().ToString("N"));
+  var root=FixtureRoot(artifactsRoot,"db");
   try{var journal=new EffectIntentJournal(root);var adapter=new PostgreSqlEffects(journal,()=>new FakeConnection(state));var intent=await adapter.PrepareAsync("db",scope);
    Check((await adapter.ExecuteAsync("db")).State==ExternalEffectState.Prepared&&state.Commands.Count==0,"Unapproved SQL ran.");journal.Approve("db",intent.Scope.Digest,"reviewer");
    Check((await adapter.ExecuteAsync("db")).State==ExternalEffectState.Unknown&&state.MigrationRuns==1,"Lost commit acknowledgment hidden.");
    Check(state.Commands.All(x=>x.Transaction!=null),"Database command escaped migration transaction.");
    Check((await adapter.ReconcileAsync("db")).State==ExternalEffectState.Completed&&state.MigrationRuns==1,"Reconciliation replayed migration.");
-   await HistoricalRuntimeReconcileAsync(scope,state);
-  }finally{if(Directory.Exists(root))Directory.Delete(root,true);}
+   await HistoricalRuntimeReconcileAsync(scope,state,artifactsRoot);
+  }catch{SafeCleanup(root,artifactsRoot,true);throw;}SafeCleanup(root,artifactsRoot,false);
  }
- static async Task HistoricalRuntimeReconcileAsync(EffectScope scope,FakeDatabase state)
+ static async Task HistoricalRuntimeReconcileAsync(EffectScope scope,FakeDatabase state,string artifactsRoot)
  {
-  var root=Path.Combine(Path.GetTempPath(),"agentos-historical-"+Guid.NewGuid().ToString("N"));
-  try{Directory.CreateDirectory(root);var project=await PracticeProject.CreateAsync(root);var stateRoot=Path.Combine(root,"state");await using var runtime=await ProjectRuntime.OpenInternal(project,stateRoot,new ScriptHost());
+  var root=FixtureRoot(artifactsRoot,"historical");
+  try{Directory.CreateDirectory(root);var project=await PracticeProject.CreateAsync(root);var stateRoot=Path.Combine(root,"state");await using var runtime=await ProjectRuntime.OpenInternal(project,stateRoot,new ScriptHost(),Path.Combine(root,"coordination"));
    var cert=Path.Combine(root,"root.pem");await File.WriteAllTextAsync(cert,"fixture root");runtime.ConfigureExternalEffects(new ExternalEffectSettings(PostgreSql:new PostgreSqlEffectSettings("fixture",5432,"fixture","approved","fixture_role",cert,true)));
    var journal=new EffectIntentJournal(Path.Combine(runtime.DataDirectory,"external-effects"));var adapter=new PostgreSqlEffects(journal,()=>new FakeConnection(state));var intent=await adapter.PrepareAsync("historical",scope);journal.Approve("historical",intent.Scope.Digest,"reviewer");journal.Save(journal.Read("historical")! with{State=ExternalEffectState.Unknown});
    runtime.ConfigureExternalEffects(new ExternalEffectSettings(PostgreSql:new PostgreSqlEffectSettings("changed",5432,"fixture","approved","fixture_role",cert,true)));
    Check((await runtime.ReconcileExternalEffectAsync("historical",connection:()=>new FakeConnection(state))).State==ExternalEffectState.Completed,"Settings drift blocked historical receipt lookup.");
    var count=state.Commands.Count;try{await runtime.ExecuteExternalEffectAsync("historical",connection:()=>new FakeConnection(state));throw new Exception("Stale execution accepted");}catch(InvalidOperationException){}Check(state.Commands.Count==count,"Stale execution queried database");
-  }finally{if(Directory.Exists(root))Directory.Delete(root,true);}
+  }catch{SafeCleanup(root,artifactsRoot,true);throw;}SafeCleanup(root,artifactsRoot,false);
  }
  sealed class FakeDatabase{internal readonly List<(string Sql,DbTransaction? Transaction)> Commands=new();internal int MigrationRuns;internal bool Durable;internal bool LoseCommit=true;internal string Hash="";}
  sealed class FakeConnection(FakeDatabase state):DbConnection
  {
   ConnectionState current=ConnectionState.Closed;
-  public override string ConnectionString{get;set;}="";public override string Database=>"fixture";public override string DataSource=>"fixture:5432";public override string ServerVersion=>"16";public override ConnectionState State=>current;
+  [AllowNull] public override string ConnectionString{get;set;}="";public override string Database=>"fixture";public override string DataSource=>"fixture:5432";public override string ServerVersion=>"16";public override ConnectionState State=>current;
   public override void ChangeDatabase(string name)=>throw new NotSupportedException();public override void Close()=>current=ConnectionState.Closed;public override void Open()=>current=ConnectionState.Open;
   public override Task OpenAsync(CancellationToken ct){Open();return Task.CompletedTask;}
   protected override DbTransaction BeginDbTransaction(IsolationLevel level)=>new FakeTransaction(this,state);
@@ -54,7 +55,7 @@ public static partial class ExternalDeliveryChecks
  }
  sealed class FakeCommand(FakeConnection connection,FakeDatabase state):DbCommand
  {
-  readonly FakeParameters parameters=new();public override string CommandText{get;set;}="";public override int CommandTimeout{get;set;}
+  readonly FakeParameters parameters=new();[AllowNull] public override string CommandText{get;set;}="";public override int CommandTimeout{get;set;}
   public override CommandType CommandType{get;set;}=CommandType.Text;public override bool DesignTimeVisible{get;set;}public override UpdateRowSource UpdatedRowSource{get;set;}
   protected override DbConnection DbConnection{get=>connection;set=>throw new NotSupportedException();}protected override DbTransaction? DbTransaction{get;set;}protected override DbParameterCollection DbParameterCollection=>parameters;
   public override void Cancel(){}public override void Prepare(){}protected override DbParameter CreateDbParameter()=>new FakeParameter();protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior)=>throw new NotSupportedException();
@@ -80,7 +81,7 @@ public static partial class ExternalDeliveryChecks
  sealed class FakeParameter:DbParameter
  {
   public override DbType DbType{get;set;}public override ParameterDirection Direction{get;set;}=ParameterDirection.Input;public override bool IsNullable{get;set;}
-  public override string ParameterName{get;set;}="";public override string SourceColumn{get;set;}="";public override object? Value{get;set;}
+  [AllowNull] public override string ParameterName{get;set;}="";[AllowNull] public override string SourceColumn{get;set;}="";public override object? Value{get;set;}
   public override DataRowVersion SourceVersion{get;set;}=DataRowVersion.Current;public override bool SourceColumnNullMapping{get;set;}public override int Size{get;set;}
   public override void ResetDbType(){}
  }

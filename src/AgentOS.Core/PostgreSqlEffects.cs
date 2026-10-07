@@ -48,7 +48,7 @@ public static class PostgreSqlProvider
     }
     private static string Identity(DbConnection connection)
     {
-        if(connection is Npgsql.NpgsqlConnection pg){var b=new Npgsql.NpgsqlConnectionStringBuilder(pg.ConnectionString);return PostgreSqlProvider.EndpointIdentity(b.Host,b.Port,pg.Database);}
+        if(connection is Npgsql.NpgsqlConnection pg){var b=new Npgsql.NpgsqlConnectionStringBuilder(pg.ConnectionString);var host=b.Host;if(string.IsNullOrWhiteSpace(host))throw new InvalidDataException("PostgreSQL endpoint host missing.");return PostgreSqlProvider.EndpointIdentity(host,b.Port,pg.Database);}
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(connection.DataSource+"\n"+connection.Database)));
     }
     private static async Task<int> Execute(DbConnection c, DbTransaction tx, string sql, CancellationToken ct, params (string, object)[] args)

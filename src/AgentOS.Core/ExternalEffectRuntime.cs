@@ -93,7 +93,7 @@ public sealed partial class ProjectRuntime
     var d=settings.Deployment??throw new InvalidOperationException("Deployment provider is not configured.");
     if(r.Operation!="deploy")throw new ArgumentException("Choose deploy.");
     artifact=Convert.ToHexString(SHA256.HashData(await BinaryBlob(commit,d.ArtifactPath,ct)));command=H(d.Command);environment=H(e.EnvironmentSha256+"\n"+d.EnvironmentName);
-    destination=d.Destination;parameters=JsonSerializer.Serialize(new DeploymentEffect(d.Backend,artifact,command,environment,destination,d.Receipt));break;
+    destination=d.Destination;HyperVProfile? frozenProfile=null;try{frozenProfile=new ExecutionProfileRegistry(_store.Root).Current.HyperV;}catch{}parameters=JsonSerializer.Serialize(new DeploymentEffect(d.Backend,artifact,command,environment,destination,d.Receipt,frozenProfile==null?null:new DeploymentExecutionSnapshot(frozenProfile,d)));break;
    default:throw new ArgumentException("Unknown provider.");
   }
   return new EffectScope(r.Provider,commit,evidence,artifact,command,environment,destination,r.Operation,parameters);
@@ -151,7 +151,7 @@ public sealed partial class ProjectRuntime
     return new PostgreSqlEffects(Journal,null,"Frozen PostgreSQL destination or trust unavailable; outcome unknown.");
    return new PostgreSqlEffects(Journal,PgConnection(new(ep.Host,ep.Port,ep.Database,p.Schema,ep.User,ep.TrustedRootCertificate,true)));
   }
-  if(intent.Scope.Kind=="deployment")return new DeploymentEffects(Journal,executor,new DeploymentReceiptProbe(new WindowsCredentialManagerProvider(),transport));
+  if(intent.Scope.Kind=="deployment"){var d=JsonSerializer.Deserialize<DeploymentEffect>(intent.Scope.ParametersJson)??throw new InvalidDataException("Frozen deployment absent.");IIsolatedDeploymentExecutor? frozen=executor;if(frozen==null&&d.Execution is { } saved&&d.Backend=="hyperv"&&saved.Settings.Backend==d.Backend&&saved.Settings.Destination==d.Destination&&H(saved.Settings.Command)==d.CommandSha256&&JsonSerializer.Serialize(saved.Settings.Receipt)==JsonSerializer.Serialize(d.Receipt))frozen=new HyperVExecution(_store.Root,saved.Profile,saved.Settings,commit=>BinaryBlob(commit,saved.Settings.ArtifactPath));return new DeploymentEffects(Journal,frozen,new DeploymentReceiptProbe(new WindowsCredentialManagerProvider(),transport));}
   throw new InvalidDataException("Unknown frozen provider.");
  }
  public Task<EffectIntent> ReconcileExternalEffectAsync(string id,HttpMessageHandler? transport=null,Func<DbConnection>? connection=null,IIsolatedDeploymentExecutor? executor=null,CancellationToken ct=default)=>Guard(async()=>

@@ -165,7 +165,7 @@ public sealed class GitHubEffects : EffectAdapterBase
             !System.Text.RegularExpressions.Regex.IsMatch(s.Repository, "^[A-Za-z0-9_.-]{1,100}$") ||
             s.Branch.StartsWith('-') || s.Branch.Contains("..") || s.Branch.Contains("@{") ||
             !System.Text.RegularExpressions.Regex.IsMatch(s.Branch, "^[A-Za-z0-9_./-]{1,200}$") ||
-            value.Scope.Destination != s.ApiOrigin + "/" + s.Owner + "/" + s.Repository || s.BaseBranch == null || !System.Text.RegularExpressions.Regex.IsMatch(s.BaseBranch,"^[A-Za-z0-9_./-]{1,200}$") || s.BaseBranch.Contains("..") || s.BaseBranch.Contains("@{") || (value.Scope.Operation == "pull_request" && (s.ExpectedBaseCommit == null || !System.Text.RegularExpressions.Regex.IsMatch(s.ExpectedBaseCommit,"^[a-fA-F0-9]{40}$")))
+            value.Scope.Destination != s.ApiOrigin + "/" + s.Owner + "/" + s.Repository || s.BaseBranch == null || !System.Text.RegularExpressions.Regex.IsMatch(s.BaseBranch,"^[A-Za-z0-9_./-]{1,200}$") || s.BaseBranch.Contains("..") || s.BaseBranch.Contains("@{") || (value.Scope.Operation == "pull_request" && (s.ExpectedBaseCommit == null || !System.Text.RegularExpressions.Regex.IsMatch(s.ExpectedBaseCommit,"^[a-fA-F0-9]{40}$"))))
             throw new InvalidDataException("GitHub scope mismatch.");
         s.Snapshot?.Validate(s.Commit); return s;
     }
@@ -189,12 +189,14 @@ public sealed class GitHubEffects : EffectAdapterBase
     }
     private static string E(string s) => Uri.EscapeDataString(s);
     private static string Repo(GitHubEffect s) => "/repos/" + E(s.Owner) + "/" + E(s.Repository);
-    private async Task<bool> CommitMatches(GitHubEffect s,CancellationToken ct)
+    private Task<bool> CommitMatches(GitHubEffect s,CancellationToken ct) => CommitMatches(s,s.Snapshot?.Commit,ct);
+    private async Task<bool> CommitMatches(GitHubEffect s,GitCommitSnapshot? expected,CancellationToken ct)
     {
-        var(status,doc)=await Send(s,HttpMethod.Get,Repo(s)+"/git/commits/"+s.Commit,null,ct);
+        var sha=expected?.Sha??s.Commit;
+        var(status,doc)=await Send(s,HttpMethod.Get,Repo(s)+"/git/commits/"+sha,null,ct);
         using(doc){if(status==HttpStatusCode.NotFound)return false;if(status!=HttpStatusCode.OK||doc==null)throw new InvalidDataException("Commit lookup inconclusive.");
-            if(!string.Equals(doc.RootElement.GetProperty("sha").GetString(),s.Commit,StringComparison.OrdinalIgnoreCase))throw new InvalidDataException("Commit SHA mismatch.");
-            if(s.Snapshot==null)return true;return doc.RootElement.GetProperty("tree").GetProperty("sha").GetString()==s.Snapshot.Commit.Tree&&doc.RootElement.GetProperty("parents").EnumerateArray().Select(x=>x.GetProperty("sha").GetString()).SequenceEqual(s.Snapshot.Commit.Parents);}
+            if(!string.Equals(doc.RootElement.GetProperty("sha").GetString(),sha,StringComparison.OrdinalIgnoreCase))throw new InvalidDataException("Commit SHA mismatch.");
+            return expected==null||doc.RootElement.GetProperty("tree").GetProperty("sha").GetString()==expected.Tree&&doc.RootElement.GetProperty("parents").EnumerateArray().Select(x=>x.GetProperty("sha").GetString()).SequenceEqual(expected.Parents);}
     }
     private async Task<bool> BaseMatches(GitHubEffect s,CancellationToken ct)
     {
@@ -210,14 +212,18 @@ public sealed class GitHubEffects : EffectAdapterBase
     private async Task Upload(GitHubEffect s,CancellationToken ct)
     {
         var snapshot=s.Snapshot??throw new InvalidDataException("Approved Git object snapshot required.");snapshot.Validate(s.Commit);
-        foreach(var parent in snapshot.Commit.Parents)if(!await Exists(s,"commits",parent,ct))throw new InvalidDataException("Commit parent absent remotely.");
+        var ancestors=snapshot.Ancestors??[];var first=ancestors.Length>0?ancestors[0]:snapshot.Commit;
+        foreach(var boundary in first.Parents)if(!await Exists(s,"commits",boundary,ct))throw new InvalidDataException("Approved Git history bound reached before a remote ancestor; no ref changed.");
         foreach(var obj in snapshot.Objects){ct.ThrowIfCancellationRequested();var plural=obj.Type=="blob"?"blobs":"trees";if(await Exists(s,plural,obj.Sha,ct))continue;
             object body=obj.Type=="blob"?new{content=obj.Base64,encoding="base64"}:new{tree=obj.Entries!.Select(e=>new{path=e.Path,mode=e.Mode=="40000"?"040000":e.Mode,type=e.Type,sha=e.Sha}).ToArray()};
             var(status,doc)=await Send(s,HttpMethod.Post,Repo(s)+"/git/"+plural,body,ct);using(doc){if(status!=HttpStatusCode.Created||doc==null||!string.Equals(doc.RootElement.GetProperty("sha").GetString(),obj.Sha,StringComparison.OrdinalIgnoreCase))throw new InvalidDataException("Git Data API returned different object SHA.");}}
-        if(await CommitMatches(s,ct))return;var c=snapshot.Commit;
-        var(created,response)=await Send(s,HttpMethod.Post,Repo(s)+"/git/commits",new{message=c.Message,tree=c.Tree,parents=c.Parents,author=new{name=c.AuthorName,email=c.AuthorEmail,date=c.AuthorDate},committer=new{name=c.CommitterName,email=c.CommitterEmail,date=c.CommitterDate}},ct);
-        using(response){if(created!=HttpStatusCode.Created||response==null||!string.Equals(response.RootElement.GetProperty("sha").GetString(),s.Commit,StringComparison.OrdinalIgnoreCase))throw new InvalidDataException("Git Data API cannot reproduce exact approved commit SHA.");}
-        if(!await CommitMatches(s,ct))throw new InvalidDataException("Uploaded commit tree or parents differ.");
+        foreach(var c in ancestors.Append(snapshot.Commit))
+        {
+            if(await CommitMatches(s,c,ct))continue;
+            var(created,response)=await Send(s,HttpMethod.Post,Repo(s)+"/git/commits",new{message=c.Message,tree=c.Tree,parents=c.Parents,author=new{name=c.AuthorName,email=c.AuthorEmail,date=c.AuthorDate},committer=new{name=c.CommitterName,email=c.CommitterEmail,date=c.CommitterDate}},ct);
+            using(response){if(created!=HttpStatusCode.Created||response==null||!string.Equals(response.RootElement.GetProperty("sha").GetString(),c.Sha,StringComparison.OrdinalIgnoreCase))throw new InvalidDataException("Git Data API cannot reproduce exact approved commit SHA.");}
+            if(!await CommitMatches(s,c,ct))throw new InvalidDataException("Uploaded commit tree or parents differ.");
+        }
     }
     private async Task<EffectOutcome> Branch(GitHubEffect s, CancellationToken ct)
     {
@@ -277,7 +283,8 @@ public sealed class GitHubEffects : EffectAdapterBase
     private async Task<EffectOutcome> CheckRemote(GitHubEffect s, string operation, CancellationToken ct)
     { var result = operation == "branch" ? await Branch(s, ct) : await Pull(s, ct); return result.State is ExternalEffectState.Prepared or ExternalEffectState.Stale ? new(ExternalEffectState.Unknown, "Historical remote outcome requires manual review; no retry.") : result; }
 }
-public sealed record DeploymentEffect(string Backend, string ArtifactSha256, string CommandSha256, string EnvironmentSha256, string Destination, DeploymentReceiptContract? Receipt = null);
+public sealed record DeploymentExecutionSnapshot(HyperVProfile Profile, DeploymentEffectSettings Settings);
+public sealed record DeploymentEffect(string Backend, string ArtifactSha256, string CommandSha256, string EnvironmentSha256, string Destination, DeploymentReceiptContract? Receipt = null, [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DeploymentExecutionSnapshot? Execution = null);
 public sealed record DeploymentCapability(string Backend, string IsolationKind, string Destination, bool Verified);
 public interface IIsolatedDeploymentExecutor
 {
@@ -305,13 +312,18 @@ public sealed class DeploymentEffects(EffectIntentJournal journal, IIsolatedDepl
         if(s.Receipt==null||receipts==null)return new(ExternalEffectState.Unavailable,"Remote applied receipt contract unavailable.");
         DeploymentReceiptProbe.Validate(s.Receipt);
         var result=await executor!.ExecuteAsync(value.Id,s,ct);
-        if(result.State is ExternalEffectState.Stale or ExternalEffectState.Unavailable)return result;
+        if(result.State!=ExternalEffectState.Completed)return result.State is ExternalEffectState.Stale or ExternalEffectState.Unavailable?result:new(ExternalEffectState.Unknown,"VM execution or shutdown unconfirmed: "+result.Detail);
         return await receipts.CheckAsync(value.Id,value.Scope,s.Receipt,ct);
     }
-    protected override Task<EffectOutcome> CheckAsync(EffectIntent value, CancellationToken ct)
+    protected override async Task<EffectOutcome> CheckAsync(EffectIntent value, CancellationToken ct)
     {
         var s = Spec(value);
-        return s.Receipt==null||receipts==null ? Task.FromResult(new EffectOutcome(ExternalEffectState.Unknown,"Remote applied receipt contract unavailable.")) : receipts.CheckAsync(value.Id,value.Scope,s.Receipt,ct);
+        if(executor==null||!executor.Capability.Verified||executor.Capability.IsolationKind!="vm"||executor.Capability.Backend!=s.Backend||executor.Capability.Destination!=s.Destination)return new(ExternalEffectState.Unknown,"Frozen VM executor unavailable; owned shutdown unconfirmed.");
+        var vm=await executor.ReconcileAsync(value.Id,s,ct);
+        if(vm.State!=ExternalEffectState.Completed)return new(ExternalEffectState.Unknown,"Owned VM outcome unconfirmed: "+vm.Detail);
+        if(s.Receipt==null||receipts==null)return new(ExternalEffectState.Unknown,"Remote applied receipt contract unavailable.");
+        var receipt=await receipts.CheckAsync(value.Id,value.Scope,s.Receipt,ct);
+        return receipt.State==ExternalEffectState.Completed?receipt:new(ExternalEffectState.Unknown,"Owned VM confirmed; remote applied receipt unconfirmed: "+receipt.Detail);
     }
 }
 
