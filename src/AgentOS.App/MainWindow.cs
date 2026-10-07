@@ -13,7 +13,7 @@ namespace AgentOS.App;
 public sealed class MainWindow : Window
 {
     readonly Grid root = new() { RowSpacing = 8, Padding = new Thickness(16,12,16,12) };
-    readonly Grid surface = new() { ColumnSpacing = 12 };
+    readonly Grid surface = new() { ColumnSpacing = 0 };
     readonly StackPanel tree = new() { Spacing = 8 };
     readonly ScrollViewer map = new() { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
     readonly ScrollViewer detail = new() { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
@@ -74,7 +74,7 @@ public sealed class MainWindow : Window
         AutomationProperties.SetAutomationId(projectPath,"ProjectPath");
         AutomationProperties.SetAutomationId(validation,"ValidationCommand");
         root.SizeChanged+=(_,e)=>{wide=e.NewSize.Width>=1000; ArrangeDetails();};
-        Shortcut(VirtualKey.N,VirtualKeyModifiers.Control,()=>prompt.Focus(FocusState.Programmatic));
+        Shortcut(VirtualKey.N,VirtualKeyModifiers.Control,()=>{if(detailsOpen&&!wide)CloseDetails();prompt.Focus(FocusState.Programmatic);});
         Shortcut(VirtualKey.Enter,VirtualKeyModifiers.Control,()=>{if(prompt.FocusState!=FocusState.Unfocused&&!previewMode)_=Guard(SendTask);});
         Shortcut(VirtualKey.Escape,VirtualKeyModifiers.None,()=>{CloseDetails();notice.IsOpen=false;});
         AppWindow.Closing+=async (_,e)=>{if(closing)return; e.Cancel=true; closing=true; timer.Stop(); if(runtime!=null)await runtime.DisposeAsync(); Close();};
@@ -225,8 +225,9 @@ public sealed class MainWindow : Window
     void OpenDetails(string id){selected=id;selectedBeforeDetails=id;detailsOpen=true;DrawDetails();ArrangeDetails();} void CloseDetails(){detailsOpen=false;ArrangeDetails();if(selectedBeforeDetails!=null&&rows.TryGetValue(selectedBeforeDetails,out var row))row.FocusDetails();}
     void ArrangeDetails()
     {
-        surface.ColumnDefinitions[0].Width=new GridLength(detailsOpen&&wide?0.55:1,GridUnitType.Star);
+        surface.ColumnDefinitions[0].Width=new GridLength(detailsOpen?(wide?0.55:0):1,GridUnitType.Star);
         surface.ColumnDefinitions[1].Width=new GridLength(detailsOpen?(wide?0.45:1):0,GridUnitType.Star);
+        surface.ColumnSpacing=detailsOpen&&wide?12:0;
         map.Visibility=detailsOpen&&!wide?Visibility.Collapsed:Visibility.Visible; composer.Visibility=detailsOpen&&!wide?Visibility.Collapsed:Visibility.Visible;
         detail.Visibility=detailsOpen?Visibility.Visible:Visibility.Collapsed;
     }
