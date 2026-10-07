@@ -1,4 +1,4 @@
-using Microsoft.UI.Xaml;
+﻿using Microsoft.UI.Xaml;
 
 namespace AgentOS.App;
 
@@ -6,6 +6,7 @@ public partial class App : Application
 {
     private Window? _window;
     private CaptureController? _capture;
+    private NotificationController? _notifications;
     public App()
     {
         UnhandledException += (_, e) =>
@@ -22,8 +23,10 @@ public partial class App : Application
         if (!Environment.GetCommandLineArgs().Contains("--ui-preview"))
         {
             _capture = new CaptureController(_window);
+            _notifications = new NotificationController((MainWindow)_window, _capture);
         }
         _window.Activate();
     }
 }
+
 
