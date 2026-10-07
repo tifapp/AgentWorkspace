@@ -35,7 +35,7 @@ public sealed class TaskMapCanvas : UserControl
     public TaskMapCanvas(TaskMap source)
     {
         map = source;
-        layoutFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AgentOS", "layouts", map.Id + ".json");
+        layoutFile = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AgentOS", "layouts", map.Id + ".json");
         LoadLayout();
         var body = new StackPanel { Spacing = 6 };
         var tools = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 5 };
@@ -159,7 +159,7 @@ public sealed class TaskMapCanvas : UserControl
     }
     void SaveLayout()
     {
-        try { Directory.CreateDirectory(Path.GetDirectoryName(layoutFile)!); File.WriteAllText(layoutFile, JsonSerializer.Serialize(positions.ToDictionary(x => x.Key, x => new[] { x.Value.X, x.Value.Y }))); }
+        try { Directory.CreateDirectory(System.IO.Path.GetDirectoryName(layoutFile)!); File.WriteAllText(layoutFile, JsonSerializer.Serialize(positions.ToDictionary(x => x.Key, x => new[] { x.Value.X, x.Value.Y }))); }
         catch (Exception ex) { status.Text = "Could not save layout: " + ex.Message; }
     }
 }

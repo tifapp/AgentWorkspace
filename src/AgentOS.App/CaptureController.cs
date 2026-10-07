@@ -44,7 +44,7 @@ public sealed class CaptureController : IDisposable
         if (window.Content is FrameworkElement root)
         {
             var accel = new KeyboardAccelerator { Key = VirtualKey.M, Modifiers = VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift };
-            accel.Invoked += (_, e) => { e.Handled = true; _ = OpenAsync(); };
+            accel.Invoked += (sender, e) => { e.Handled = true; _ = OpenAsync(); };
             root.KeyboardAccelerators.Add(accel);
             // The existing header is a Grid whose right-hand child is its command stack.
             if (root is Grid grid && grid.Children.FirstOrDefault() is Grid header &&
