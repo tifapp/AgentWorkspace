@@ -166,7 +166,7 @@ public sealed class MainWindow : Window
             taskPrompt=new TextBox{Header="Task prompt",Text=task.Prompt,AcceptsReturn=true,TextWrapping=TextWrapping.Wrap,MinHeight=75};
             acceptance=new TextBox{Header="Acceptance criteria",Text=task.Acceptance,AcceptsReturn=true,TextWrapping=TextWrapping.Wrap,MinHeight=65};
             selectedBox=new CheckBox{Content="Select this task for explicit start",IsChecked=task.Selected};
-            foreach(var control in new UIElement[]{taskTitle,taskPrompt,acceptance,selectedBox}){control.IsEnabled=current?.Status==MapStatus.Draft;detailPanel.Children.Add(control);}
+            foreach(var control in new Control[]{taskTitle,taskPrompt,acceptance,selectedBox}){control.IsEnabled=current?.Status==MapStatus.Draft;detailPanel.Children.Add(control);}
             detailPanel.Children.Add(Label("Attempts: "+(task.WorkIds.Count==0?(task.WorkId??"none"):string.Join(", ",task.WorkIds)),12));
             if(current?.Status==MapStatus.Draft)detailPanel.Children.Add(Action("Apply task edits",()=>
             {
