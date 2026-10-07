@@ -1,4 +1,4 @@
-﻿param()
+param()
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $paths = @{
@@ -99,7 +99,7 @@ $models = Get-Content -LiteralPath (Join-Path $repo 'src/AgentOS.Core/Models.cs'
 $storage = Get-Content -LiteralPath (Join-Path $repo 'src/AgentOS.Core/Storage.cs') -Raw
 $tests = Get-Content -LiteralPath (Join-Path $repo 'tests/AgentOS.Tests/Program.cs') -Raw
 $cli = Get-Content -LiteralPath (Join-Path $repo 'src/AgentOS.Cli/Program.cs') -Raw
-Require $main 'Action\("Maps",ShowMaps,"TaskMaps"\)' 'task-map entry in compact UI'
+Require $main 'Action\("Maps",(?:ShowMaps|async\(\)=>\{settingsDialog\?\.Hide\(\);await closed\.Task;await ShowMaps\(\);\}),"TaskMaps"\)' 'task-map entry in compact UI'
 Require $main 'SaveMapDraft|Save reviewed draft' 'reviewed draft save'
 Require $main 'StartSelectedMapTasksAsync' 'explicit map start control'
 Require $models 'List<TaskMap> Maps' 'durable maps'
@@ -116,4 +116,5 @@ foreach($relative in @('docs/product-objective.md','docs/implementation-plan.md'
  Require (Get-Content -LiteralPath (Join-Path $repo $relative) -Raw) 'Phone work is deferred and explicitly excluded' "$relative phone exclusion"
 }
 Write-Output 'Draft-map and phone-boundary structural checks passed. Native compilation and execution remain unverified.'
+
 

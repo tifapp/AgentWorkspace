@@ -1,4 +1,4 @@
-﻿using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml;
 
 namespace AgentOS.App;
 
@@ -23,10 +23,12 @@ public partial class App : Application
         if (!Environment.GetCommandLineArgs().Contains("--ui-preview"))
         {
             _capture = new CaptureController(_window);
+            ((MainWindow)_window).Capture = _capture;
             _notifications = new NotificationController((MainWindow)_window, _capture);
         }
         _window.Activate();
     }
 }
+
 
 

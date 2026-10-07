@@ -1,4 +1,4 @@
-﻿using AgentOS.Core;
+using AgentOS.Core;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation.Peers;using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
@@ -18,7 +18,7 @@ public sealed class MainWindow : Window
     readonly ScrollViewer map = new() { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
     readonly ScrollViewer detail = new() { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
     readonly StackPanel detailBody = new() { Spacing = 10 }; readonly StackPanel composer = new() { Spacing = 5 }; readonly TextBlock emptyHint = Label("No tasks yet. Describe a change below to start your first task.",13);
-    readonly TextBlock projectName = Label("Open a project",18,true), summary = Label("",12); readonly Button projectButton = new(); readonly TextBlock previewBadge = Label("UI preview — sample data",12,true);
+    readonly TextBlock projectName = Label("Open a project",18,true), summary = Label("",12); readonly Button projectButton = new(); readonly TextBlock previewBadge = Label("UI preview � sample data",12,true);
     readonly TextBlock detailHeading = Label("",18,true), detailStatus = Label("",13); TextBox? detailReport; readonly TextBlock liveTranscript = Label("Open to load agent messages.",12); readonly Expander transcriptExpander = new() { Header = "Live transcript" };
     readonly Button decisions = new() { Content = "Decisions" };
     readonly InfoBar notice = new() { IsOpen = false, IsClosable = true };
@@ -30,7 +30,7 @@ public sealed class MainWindow : Window
     DispatcherTimer? previewUpdateTimer;
     readonly Dictionary<string, TaskRow> rows = new();
     readonly string settings = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"AgentOS","desktop.json");
-    ProjectRuntime? runtime; ProjectState? snapshot; string? dataRoot, selected;
+    ProjectRuntime? runtime; ProjectState? snapshot; string? dataRoot, selected; internal CaptureController? Capture { get; set; }
     long generation = -1; bool closing, detailsOpen, wide, walkthrough, previewUpdated, previewEmpty; readonly bool previewMode = Environment.GetCommandLineArgs().Contains("--ui-preview"); string? selectedBeforeDetails;
 
     public MainWindow()
@@ -47,7 +47,7 @@ public sealed class MainWindow : Window
         identity.Children.Add(projectButton);identity.Children.Add(summary);identity.Children.Add(previewBadge);
         previewBadge.Visibility=Visibility.Collapsed;header.Children.Add(identity);
         var controls = new FlowPanel();
-        var settingsButton=Action("Settings",ShowSettings,"Settings");settingsButton.Content="⚙ Settings";AutomationProperties.SetName(settingsButton,"Settings");controls.Children.Add(settingsButton);
+        var settingsButton=Action("Settings",ShowSettings,"Settings");settingsButton.Content="? Settings";AutomationProperties.SetName(settingsButton,"Settings");controls.Children.Add(settingsButton);
 
         decisions.Click += (_,_) => ShowDecisionMenu();
         AutomationProperties.SetAutomationId(decisions,"PendingDecisions"); controls.Children.Add(decisions);
@@ -114,61 +114,110 @@ public sealed class MainWindow : Window
     async Task ShowSettings()
     {
         if(previewMode){await ShowPreviewSettings();return;} var body=new StackPanel{Spacing=12};
+        ContentDialog? settingsDialog=null;var closed=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         Detach(projectPath);Detach(validation);body.Children.Add(projectPath);
-        body.Children.Add(Row(Action("Browse…",Browse,"BrowseProject"),Action("Open project",OpenProject,"OpenProject")));
+        body.Children.Add(Row(Action("Browse�",Browse,"BrowseProject"),Action("Open project",OpenProject,"OpenProject")));
         body.Children.Add(validation);
         body.Children.Add(Action("Save setup",()=>{RequireRuntime().Configure(validation.Text,HostDiscovery.FindCodex());Notice("Setup saved","Validation command saved.");return Task.CompletedTask;},"SaveSetup"));
         body.Children.Add(Label("A local Git project, Git, and an authenticated Codex CLI are required. Tasks start from committed state.",12));
         var checks=new StackPanel{Spacing=5};
         body.Children.Add(new Expander{Header="Prerequisites",Content=checks});
-        body.Children.Add(Action("Check prerequisites",async()=>{checks.Children.Clear();foreach(var c in await HostDiscovery.CheckAsync())checks.Children.Add(Label((c.Ready?"Ready: ":"Action needed: ")+c.Name+" — "+c.Detail,12));},"CheckPrerequisites"));
+        body.Children.Add(Action("Check prerequisites",async()=>{checks.Children.Clear();foreach(var c in await HostDiscovery.CheckAsync())checks.Children.Add(Label((c.Ready?"Ready: ":"Action needed: ")+c.Name+" � "+c.Detail,12));},"CheckPrerequisites"));
         var advanced=new StackPanel{Spacing=8};
         advanced.Children.Add(Label(ProjectRuntime.Coverage,12));
-        advanced.Children.Add(Action("Maps",ShowMaps,"TaskMaps"));
+        advanced.Children.Add(Action("Maps",async()=>{settingsDialog?.Hide();await closed.Task;await ShowMaps();},"TaskMaps"));
+        advanced.Children.Add(Action("Capture context into map",async()=>{if(Capture==null)throw new InvalidOperationException("Capture is unavailable.");settingsDialog?.Hide();await closed.Task;await Capture.OpenAsync();},"CaptureNewMap"));
+        advanced.Children.Add(Action("Work interactions",async()=>{settingsDialog?.Hide();await closed.Task;await new WorkInteractionsDialog(RequireRuntime(),root.XamlRoot).ShowAsync();},"WorkInteractions"));
+        advanced.Children.Add(Action("External effects",()=>ExternalEffectsDialog.OpenAsync(RequireRuntime()),"ExternalEffects"));
         advanced.Children.Add(Action("Create practice project",CreatePractice,"CreatePractice"));
         advanced.Children.Add(Action("Run concurrency check",Walkthrough,"RunWalkthrough"));
         advanced.Children.Add(Action("Open evidence folder",()=>OpenPath(RequireRuntime().DataDirectory),"OpenEvidenceFolder"));
         advanced.Children.Add(Action("Open project folder",()=>OpenPath(RequireRuntime().Snapshot.ProjectPath),"OpenProjectFolder"));
         body.Children.Add(new Expander{Header="Advanced: coverage, practice and concurrency",Content=advanced});
-        var dialog=new ContentDialog{Title="Project settings",Content=new ScrollViewer{Content=body,MaxHeight=540,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled},CloseButtonText="Close",XamlRoot=root.XamlRoot};
-        try{await dialog.ShowAsync();}finally{body.Children.Remove(projectPath);body.Children.Remove(validation);}
+        settingsDialog=new ContentDialog{Title="Project settings",Content=new ScrollViewer{Content=body,MaxHeight=540,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled},CloseButtonText="Close",XamlRoot=root.XamlRoot};
+        try{await settingsDialog.ShowAsync();}finally{body.Children.Remove(projectPath);body.Children.Remove(validation);closed.TrySetResult();}
     }
-    async Task ShowPreviewSettings(){var dialog=new ContentDialog{Title="Project settings · UI preview",Content=Label("Sample project. Actions are unavailable in preview.",13),CloseButtonText="Close",XamlRoot=root.XamlRoot};await dialog.ShowAsync();}
+    async Task ShowPreviewSettings(){var dialog=new ContentDialog{Title="Project settings � UI preview",Content=Label("Sample project. Actions are unavailable in preview.",13),CloseButtonText="Close",XamlRoot=root.XamlRoot};await dialog.ShowAsync();}
     async Task ShowMaps()
     {
         var r=RequireRuntime();
-        var body=new StackPanel{Spacing=10};
-        body.Children.Add(Label("Draft task maps",18,true));
-        body.Children.Add(Label("Edit the JSON, save a draft, then select ready tasks to start. Saving never starts Codex.",12));
-        var editor=new TextBox{Header="Editable task map",AcceptsReturn=true,TextWrapping=TextWrapping.Wrap,MinHeight=220,MaxHeight=350};
-        AutomationProperties.SetAutomationId(editor,"TaskMapEditor"); body.Children.Add(editor);
-        var picker=new ComboBox{Header="Saved maps",MinWidth=260};
-        foreach(var saved in r.Snapshot.Maps)picker.Items.Add(new ComboBoxItem{Content=saved.Title+" · "+saved.Status,Tag=saved.Id});
-        picker.SelectionChanged+=(_,_)=>{if(picker.SelectedItem is ComboBoxItem item)editor.Text=JsonSerializer.Serialize(r.Snapshot.Maps.Single(m=>m.Id==(string)item.Tag),JsonFormat.Options);};
-        body.Children.Add(picker);
-        body.Children.Add(Row(Action("New draft from prompt",()=>
+        var body=new StackPanel{Spacing=9};
+        body.Children.Add(Label("Saved task maps",18,true));
+        body.Children.Add(Label("Choose a map to inspect its graph, tasks, links and citations. Save draft edits before starting selected ready tasks.",12));
+        var picker=new ComboBox{Header="Saved maps",MinWidth=300};
+        var canvasHost=new ContentControl();
+        var titleHost=new ContentControl();
+        var taskPicker=new ComboBox{Header="Inspect task",MinWidth=300};
+        var detailPanel=new StackPanel{Spacing=6};
+        var citations=new StackPanel{Spacing=3};
+        var info=Label("Choose a saved map.",12);
+        body.Children.Add(picker);body.Children.Add(info);body.Children.Add(titleHost);body.Children.Add(canvasHost);body.Children.Add(taskPicker);body.Children.Add(detailPanel);body.Children.Add(citations);
+        TaskMap? current=null; TaskMapCanvas? canvas=null;
+        TextBox? title=null,taskTitle=null,taskPrompt=null,acceptance=null;
+        CheckBox? selectedBox=null; MapTask? shownTask=null;
+        bool HasUnappliedTaskEdits()=>shownTask!=null&&taskTitle!=null&&taskPrompt!=null&&acceptance!=null&&selectedBox!=null&&
+            (taskTitle.Text.Trim()!=shownTask.Title||taskPrompt.Text.Trim()!=shownTask.Prompt||acceptance.Text.Trim()!=shownTask.Acceptance||(selectedBox.IsChecked==true)!=shownTask.Selected);
+        void LoadTask(MapTask? task)
         {
-            var value=prompt.Text.Trim();if(value.Length==0)throw new ArgumentException("Enter a prompt in the task editor first.");
-            var title=value.Length>70?value[..70]:value;
-            var draft=new AgentOS.Core.TaskMap{Title=title,Tasks=[new MapTask{Title=title,Prompt=value,Acceptance="Describe the verifiable result before starting."}]};
-            editor.Text=JsonSerializer.Serialize(draft,JsonFormat.Options);return Task.CompletedTask;
-        },"NewMapDraft"),Action("Save reviewed draft",()=>
+            detailPanel.Children.Clear();shownTask=task;
+            if(task==null)return;
+            detailPanel.Children.Add(Label("Task details � "+task.Status,15,true));
+            taskTitle=new TextBox{Header="Task title",Text=task.Title};
+            taskPrompt=new TextBox{Header="Task prompt",Text=task.Prompt,AcceptsReturn=true,TextWrapping=TextWrapping.Wrap,MinHeight=75};
+            acceptance=new TextBox{Header="Acceptance criteria",Text=task.Acceptance,AcceptsReturn=true,TextWrapping=TextWrapping.Wrap,MinHeight=65};
+            selectedBox=new CheckBox{Content="Select this task for explicit start",IsChecked=task.Selected};
+            foreach(var control in new UIElement[]{taskTitle,taskPrompt,acceptance,selectedBox}){control.IsEnabled=current?.Status==MapStatus.Draft;detailPanel.Children.Add(control);}
+            detailPanel.Children.Add(Label("Attempts: "+(task.WorkIds.Count==0?(task.WorkId??"none"):string.Join(", ",task.WorkIds)),12));
+            if(current?.Status==MapStatus.Draft)detailPanel.Children.Add(Action("Apply task edits",()=>
+            {
+                if(current?.Status!=MapStatus.Draft)throw new InvalidOperationException("Only draft maps can be edited.");
+                var old=(task.Title,task.Prompt,task.Acceptance,task.Selected);
+                task.Title=taskTitle.Text.Trim();task.Prompt=taskPrompt.Text.Trim();task.Acceptance=acceptance.Text.Trim();task.Selected=selectedBox.IsChecked==true;
+                try{TaskMapRules.Validate(current);}catch{(task.Title,task.Prompt,task.Acceptance,task.Selected)=old;throw;}
+                canvas?.Refresh();info.Text="Unsaved draft edits.";return Task.CompletedTask;
+            },"ApplyMapTask"));
+        }
+        void LoadMap(TaskMap saved)
         {
-            var draft=JsonSerializer.Deserialize<AgentOS.Core.TaskMap>(editor.Text,JsonFormat.Options)??throw new ArgumentException("The draft is empty.");
-            var existing=r.Snapshot.Maps.SingleOrDefault(m=>m.Id==draft.Id);
-            var id=r.SaveDraftMap(draft,existing==null?null:draft.Revision);
-            editor.Text=JsonSerializer.Serialize(r.Snapshot.Maps.Single(m=>m.Id==id),JsonFormat.Options);
-            Notice("Draft saved","Select ready tasks and start them explicitly.");return Task.CompletedTask;
-        },"SaveMapDraft")));
+            current=JsonFormat.Copy(saved);
+            title=new TextBox{Header="Map title",Text=current.Title,IsEnabled=current.Status==MapStatus.Draft};
+            canvas=new TaskMapCanvas(current);
+            canvas.ResolveTaskResult=id=>Task.FromResult(r.Snapshot.Work.FirstOrDefault(x=>x.Id==id));
+            canvas.SelectionChanged+=LoadTask;
+            canvas.MapChanged+=()=>{if(current.Status==MapStatus.Draft)info.Text="Unsaved draft edits.";else LoadMap(saved);};
+            taskPicker.Items.Clear();foreach(var task in current.Tasks)taskPicker.Items.Add(new ComboBoxItem{Content=task.Title+" � "+task.Status,Tag=task.Id});
+            canvasHost.Content=canvas;detailPanel.Children.Clear();shownTask=null;titleHost.Content=title;
+            info.Text=$"{current.Status} � revision {current.Revision} � {current.Citations.Count} citations. "+(current.Status==MapStatus.Draft?"Select a task to edit it.":"This map is read only.");
+            citations.Children.Clear();foreach(var citation in current.Citations)citations.Children.Add(Label($"Citation: {citation.Source} � SHA-256 {citation.Sha256}",12));
+        }
+        void Reload(string? id=null)
+        {
+            id??=(picker.SelectedItem as ComboBoxItem)?.Tag as string;
+            picker.Items.Clear();foreach(var saved in r.Snapshot.Maps.OrderBy(x=>x.Title))picker.Items.Add(new ComboBoxItem{Content=saved.Title+" � "+saved.Status,Tag=saved.Id});
+            picker.SelectedItem=picker.Items.OfType<ComboBoxItem>().FirstOrDefault(x=>(string)x.Tag==id);
+            if(picker.SelectedItem==null&&picker.Items.Count>0)picker.SelectedIndex=0;
+        }
+        picker.SelectionChanged+=(_,_)=>{if(picker.SelectedItem is ComboBoxItem entry)LoadMap(r.Snapshot.Maps.Single(x=>x.Id==(string)entry.Tag));};
+        taskPicker.SelectionChanged+=(_,_)=>{if(current!=null&&taskPicker.SelectedItem is ComboBoxItem choice)LoadTask(current.Tasks.Single(x=>x.Id==(string)choice.Tag));};
+        Reload();
+        body.Children.Add(Action("Save draft",()=>
+        {
+            if(current==null||title==null)throw new ArgumentException("Choose a map.");
+            if(current.Status!=MapStatus.Draft)throw new InvalidOperationException("Only draft maps can be saved.");
+            if(HasUnappliedTaskEdits())throw new InvalidOperationException("Apply task edits before saving the draft.");
+            current.Title=title.Text.Trim();TaskMapRules.Validate(current);
+            var id=r.SaveDraftMap(current,current.Revision);Reload(id);
+            Notice("Draft saved","No task was started.");return Task.CompletedTask;
+        },"SaveMapDraft"));
         body.Children.Add(Action("Start selected ready tasks",async()=>
         {
-            var draft=JsonSerializer.Deserialize<AgentOS.Core.TaskMap>(editor.Text,JsonFormat.Options)??throw new ArgumentException("Choose a saved map first.");
-            var saved=r.Snapshot.Maps.SingleOrDefault(m=>m.Id==draft.Id)??throw new InvalidOperationException("Save the draft before starting.");
-            if(saved.Revision!=draft.Revision || JsonSerializer.Serialize(saved,JsonFormat.Options)!=JsonSerializer.Serialize(draft,JsonFormat.Options))throw new InvalidOperationException("Save or reload edited map details before starting.");
-            var launched=await r.StartSelectedMapTasksAsync(saved.Id);Notice("Tasks started",string.Join(", ",launched));
+            if(current==null)throw new ArgumentException("Choose a saved map.");
+            if(HasUnappliedTaskEdits())throw new InvalidOperationException("Apply task edits and save the draft before starting.");
+            var saved=r.Snapshot.Maps.SingleOrDefault(x=>x.Id==current.Id)??throw new InvalidOperationException("Save this map first.");
+            if(title?.Text.Trim()!=current.Title || JsonSerializer.Serialize(saved,JsonFormat.Options)!=JsonSerializer.Serialize(current,JsonFormat.Options))throw new InvalidOperationException("Save draft edits before starting tasks.");
+            var launched=await r.StartSelectedMapTasksAsync(saved.Id);Notice("Tasks started",string.Join(", ",launched));Reload(saved.Id);
         },"StartMapTasks"));
-        var dialog=new ContentDialog{Title="Task maps",Content=new ScrollViewer{Content=body,MaxHeight=560},CloseButtonText="Close",XamlRoot=root.XamlRoot};
-        await dialog.ShowAsync();
+        await new ContentDialog{Title="Task maps",Content=new ScrollViewer{Content=body,MaxHeight=590},CloseButtonText="Close",XamlRoot=root.XamlRoot}.ShowAsync();
     }
     async Task Browse()
     {var picker=new FolderPicker();picker.FileTypeFilter.Add("*");WinRT.Interop.InitializeWithWindow.Initialize(picker,WinRT.Interop.WindowNative.GetWindowHandle(this));var folder=await picker.PickSingleFolderAsync();if(folder!=null)projectPath.Text=folder.Path;}
@@ -185,7 +234,11 @@ public sealed class MainWindow : Window
     async Task SendTask()
     {if(previewMode)return;var value=prompt.Text;var id=await Commands.Start(value,auto.IsChecked==true);prompt.Text="";selected=id;Refresh();}
     async Task SendFollowUp(string parentId,string value)
-    {if(previewMode)return;var id=await Commands.Start(value,auto.IsChecked==true,parentId);rows[parentId].ClearReply();selected=id;Refresh();}
+    {if(previewMode)return;var work=RequireRuntime().Snapshot.Work.Single(x=>x.Id==parentId);
+     if(work.IsActive)await Commands.SendSteering(parentId,value);
+     else if(work.Status==WorkStatus.Completed)selected=await Commands.ReplyAfterCompletion(parentId,value);
+     else throw new InvalidOperationException("Only an active or completed task accepts a reply.");
+     rows[parentId].ClearReply();Refresh();}
     void Refresh()
     {
         if(runtime==null)return;
@@ -197,7 +250,7 @@ public sealed class MainWindow : Window
         generation=state.Generation;snapshot=state;
         if(state.Work.Count==0&&detailsOpen)CloseDetails();
         var pending=state.Decisions.Count(x=>x.Status==DecisionStatus.Pending);
-        summary.Text=$"{state.Work.Count(x=>x.IsActive)} active · {state.Work.Count(x=>x.Status==WorkStatus.Completed)} completed";
+        summary.Text=$"{state.Work.Count(x=>x.IsActive)} active � {state.Work.Count(x=>x.Status==WorkStatus.Completed)} completed";
         AutomationProperties.SetLiveSetting(summary,AutomationLiveSetting.Polite);
         decisions.Content=pending==0?"Decisions":$"Decisions ({pending})";decisions.IsEnabled=pending>0&&!previewMode;
         var scrollOffset=map.VerticalOffset;
@@ -215,7 +268,7 @@ public sealed class MainWindow : Window
         Reconcile(tree,state.Work.Where(x=>x.ParentId==null||!rows.ContainsKey(x.ParentId)).Reverse().Select(x=>x.Id).ToArray());
         foreach(var work in state.Work){Reconcile(rows[work.Id].Children,state.Work.Where(x=>x.ParentId==work.Id).Select(x=>x.Id).ToArray());rows[work.Id].UpdateChildren();}
         DispatcherQueue.TryEnqueue(()=>{if(Math.Abs(map.VerticalOffset-scrollOffset)>1)map.ChangeView(null,scrollOffset,null,true);});
-        if(detailsOpen){var shown=state.Work.FirstOrDefault(x=>x.Id==selected);if(shown!=null){detailHeading.Text=shown.StatusLabel+" · "+shown.ShortTask;detailStatus.Text=shown.Detail;if(detailReport!=null&&detailReport.Text!=(shown.CodexReport??""))detailReport.Text=shown.CodexReport??"";}}
+        if(detailsOpen){var shown=state.Work.FirstOrDefault(x=>x.Id==selected);if(shown!=null){detailHeading.Text=shown.StatusLabel+" � "+shown.ShortTask;detailStatus.Text=shown.Detail;if(detailReport!=null&&detailReport.Text!=(shown.CodexReport??""))detailReport.Text=shown.CodexReport??"";}}
     }
     void Reconcile(StackPanel parent,string[] ids)
     {
@@ -241,26 +294,26 @@ public sealed class MainWindow : Window
         detailBody.Children.Clear();detailReport=null;
         var work=snapshot?.Work.FirstOrDefault(x=>x.Id==selected);if(work==null)return;
         detailBody.Children.Add(Row(Action("Back",()=>{CloseDetails();return Task.CompletedTask;},"BackToTasks"),Action("Refresh details",()=>{DrawDetails();return Task.CompletedTask;},"RefreshDetails")));
-        detailHeading.Text=work.StatusLabel+" · "+work.ShortTask;detailBody.Children.Add(detailHeading);
+        detailHeading.Text=work.StatusLabel+" � "+work.ShortTask;detailBody.Children.Add(detailHeading);
         detailStatus.Text=work.Detail;detailBody.Children.Add(detailStatus);
         if(work.ParentId!=null&&snapshot!.Work.FirstOrDefault(x=>x.Id==work.ParentId) is { } original)
             detailBody.Children.Add(Action("Parent task",()=>{OpenDetails(original.Id);return Task.CompletedTask;},"OriginalTask"));
         foreach(var child in snapshot!.Work.Where(x=>x.ParentId==work.Id))
-            detailBody.Children.Add(Action("Child task · "+child.StatusLabel,()=>{OpenDetails(child.Id);return Task.CompletedTask;},"RevisionTask"));
-        detailBody.Children.Add(Card("Full prompt",ReadOnly(work.Task,200))); if(work.IsActive&&!previewMode)detailBody.Children.Add(transcriptExpander);
+            detailBody.Children.Add(Action("Child task � "+child.StatusLabel,()=>{OpenDetails(child.Id);return Task.CompletedTask;},"RevisionTask"));
+        detailBody.Children.Add(Card("Full prompt",ReadOnly(work.Task,200))); if(work.IsActive&&!previewMode){var steering=new TextBox{Header="Reply to active task",PlaceholderText="Send guidance to the current turn",AcceptsReturn=true,TextWrapping=TextWrapping.Wrap,MinHeight=65};AutomationProperties.SetAutomationId(steering,"ActiveTaskSteering");detailBody.Children.Add(steering);detailBody.Children.Add(Action("Send steering",async()=>{await Commands.SendSteering(work.Id,steering.Text);steering.Text="";},"SendSteering"));detailBody.Children.Add(transcriptExpander);}
         if(!string.IsNullOrWhiteSpace(work.CodexReport)){detailReport=ReadOnly(work.CodexReport,300);detailBody.Children.Add(Card("Full report",detailReport));}
         if(work.ChangedPaths.Count>0)detailBody.Children.Add(Card("Changed files",ReadOnly(string.Join(Environment.NewLine,work.ChangedPaths),160)));
         if(!string.IsNullOrWhiteSpace(work.Diff))detailBody.Children.Add(Card("Candidate diff",ReadOnly(work.Diff,300)));
         if(work.IntegratedCommit!=null)detailBody.Children.Add(Label("Integrated commit: "+work.IntegratedCommit,12));
         foreach(var evidence in work.Evidence)
         {var panel=new StackPanel{Spacing=5};
-         panel.Children.Add(Label($"{evidence.TestedAt.LocalDateTime:g} · exit {evidence.ExitCode} · {(evidence.Passed?"passed":"failed")}",12));
+         panel.Children.Add(Label($"{evidence.TestedAt.LocalDateTime:g} � exit {evidence.ExitCode} � {(evidence.Passed?"passed":"failed")}",12));
          panel.Children.Add(ReadOnly($"Commit {evidence.Commit}\nTree {evidence.Tree}\nBased on {evidence.AgainstCommit}\n{evidence.Command}\n{evidence.Environment}",170));
          if(!previewMode)panel.Children.Add(Action("Open validation log",()=>OpenPath(evidence.LogPath),"OpenValidationLog"));
          detailBody.Children.Add(Card("Validation evidence",panel));}
         detailBody.Children.Add(Label("Recent activity",15,true));
         foreach(var entry in snapshot!.Events.Where(x=>x.WorkId==work.Id).TakeLast(20).Reverse())
-            detailBody.Children.Add(Label(entry.At.ToLocalTime().ToString("g")+" · "+entry.Message,12));
+            detailBody.Children.Add(Label(entry.At.ToLocalTime().ToString("g")+" � "+entry.Message,12));
     }
     async Task LoadTranscript(){if(previewMode||selected==null||!detailsOpen||!transcriptExpander.IsExpanded)return;var id=selected;var text=await TranscriptReader.ReadAsync(Commands.Transcript(id));if(selected==id&&liveTranscript.Text!=text)liveTranscript.Text=text;}
     MenuFlyout RowMenu(string id)
@@ -270,7 +323,8 @@ public sealed class MainWindow : Window
         {var item=new MenuFlyoutItem{Text=title};AutomationProperties.SetAutomationId(item,automationId);item.Click+=async(_,_)=>await Guard(action);menu.Items.Add(item);}
         if(previewMode)return menu; if(work.IsActive)Add("Stop task",()=>{Commands.Stop(id);return Task.CompletedTask;},"CancelTask");
         if(work.Status==WorkStatus.Private)Add("Integrate candidate",()=>Commands.Integrate(id),"IntegrateCandidate");
-        if(!work.IsActive)Add("Revise with Codex",async()=>{selected=await Commands.Revise(id);Refresh();},"ReviseTask");
+        if(!work.IsActive&&work.Status!=WorkStatus.Completed)Add("Revise with Codex",async()=>{selected=await Commands.Revise(id);Refresh();},"ReviseTask");
+        Add("Interactions",()=>new WorkInteractionsDialog(RequireRuntime(),root.XamlRoot,id).ShowAsync(),"TaskInteractions");
         if(work.Status==WorkStatus.Completed)Add("Prepare release decision",async()=>{await Commands.PrepareRelease(id);Refresh();},"PrepareRelease");
         if(Directory.Exists(work.Workspace))Add("Open private files",()=>OpenPath(work.Workspace),"OpenPrivate");
         Add("Open transcript",()=>OpenPath(Commands.Transcript(id)),"OpenTranscript");
@@ -283,7 +337,7 @@ public sealed class MainWindow : Window
         var menu=new MenuFlyout();
         foreach(var choice in snapshot?.Decisions.Where(x=>x.Status==DecisionStatus.Pending).Reverse()??[])
         {
-            var item=new MenuFlyoutItem{Text=(snapshot?.Work.FirstOrDefault(x=>x.Id==choice.WorkId)?.ShortTask??"Task")+" · "+choice.Candidate[..Math.Min(8,choice.Candidate.Length)]};
+            var item=new MenuFlyoutItem{Text=(snapshot?.Work.FirstOrDefault(x=>x.Id==choice.WorkId)?.ShortTask??"Task")+" � "+choice.Candidate[..Math.Min(8,choice.Candidate.Length)]};
             item.Click+=async(_,_)=>await Guard(()=>ShowDecision(choice.Id));menu.Items.Add(item);
         }
         menu.ShowAt(decisions);
@@ -303,7 +357,7 @@ public sealed class MainWindow : Window
         {content.Children.Add(Card("Changed files",ReadOnly(string.Join(Environment.NewLine,work.ChangedPaths),100)));
          content.Children.Add(Card("Diff",ReadOnly(work.Diff,180)));
          foreach(var e in work.Evidence.Where(x=>x.Commit==decision.Candidate))
-            content.Children.Add(Card("Validation evidence",Label($"{e.Command} · exit {e.ExitCode} · {e.TestedAt.LocalDateTime:g}\n{e.LogPath}",12)));}
+            content.Children.Add(Card("Validation evidence",Label($"{e.Command} � exit {e.ExitCode} � {e.TestedAt.LocalDateTime:g}\n{e.LogPath}",12)));}
         ContentDialog dialog=null!;
         content.Children.Add(Action("Approve this local release",async()=>{await Commands.Decide(decision.Id,true);dialog.Hide();},"ApproveDecision"));
         content.Children.Add(Action("Decline release",async()=>{await Commands.Decide(decision.Id,false);dialog.Hide();},"RejectDecision"));
@@ -338,6 +392,14 @@ public sealed class MainWindow : Window
     static Border Card(string title,UIElement content)
     {var stack=new StackPanel{Spacing=5};stack.Children.Add(Label(title,13,true));stack.Children.Add(content);return new Border{Child=stack,Padding=new Thickness(10),CornerRadius=new CornerRadius(6),BorderThickness=new Thickness(1),Background=Application.Current.Resources["CardBackgroundFillColorDefaultBrush"] as Brush,BorderBrush=Application.Current.Resources["CardStrokeColorDefaultBrush"] as Brush};}
 }
+
+
+
+
+
+
+
+
 
 
 

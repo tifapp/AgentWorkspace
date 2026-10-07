@@ -1,4 +1,4 @@
-﻿using AgentOS.Core;
+using AgentOS.Core;
 
 namespace AgentOS.App;
 
@@ -7,6 +7,8 @@ internal sealed class RuntimeUiCommands(ProjectRuntime runtime)
 {
     public Task<string> Start(string prompt, bool autoIntegrate, string? parentId = null)
         => runtime.StartAsync(prompt, autoIntegrate, parentId: parentId);
+    public Task<TaskInteraction> SendSteering(string id, string text) => runtime.SendSteeringAsync(id, text);
+    public Task<string> ReplyAfterCompletion(string id, string text) => runtime.ReplyAfterCompletionAsync(id, text);
     public Task<string> Revise(string id) => runtime.ReviseAsync(id);
     public Task Integrate(string id) => runtime.IntegrateAsync(id);
     public void Stop(string id) => runtime.Cancel(id);
@@ -16,4 +18,5 @@ internal sealed class RuntimeUiCommands(ProjectRuntime runtime)
     public string Transcript(string id) => runtime.TranscriptPath(id);
     public string Diagnostics(string id) => runtime.DiagnosticsPath(id);
 }
+
 

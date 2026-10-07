@@ -59,4 +59,8 @@ The repository began as a README only. This is a new Windows runtime; it does no
 
 ## Current source revision
 
-Draft task-map source and a compact Maps review dialog have been added since the last compiled release. See [integration status](docs/integration-status.md) before relying on this source. Phone work is deferred.
+Draft task-map source, desktop capture, map review, durable interactions, and external-effect review controls have been added since the last compiled release. See [integration status](docs/integration-status.md) for verification limits. Phone work is deferred.
+
+Desktop capture, map review, interaction, and effect controls are described in [desktop interaction controls](docs/desktop-interactions.md).
+
+

@@ -1,6 +1,6 @@
-﻿# Windows/Codex integration status, 2026-10-07
+# Windows/Codex integration status, 2026-10-07 (historical source snapshot)
 
-This source revision is a partial implementation of the approved program. Earlier retirement validation receipts describe an older binary. No .NET SDK or native execution was available through the managed workspace, so the new source has not been compiled, launched, or exercised against live Codex, GitHub, PostgreSQL, or deployment targets.
+This table records an earlier source snapshot. Current desktop controls and their verification limits are documented in [desktop interaction controls](desktop-interactions.md). This source revision is a partial implementation of the approved program. Earlier retirement validation receipts describe an older binary. No .NET SDK or native execution was available through the managed workspace, so the new source has not been compiled, launched, or exercised against live Codex, GitHub, PostgreSQL, or deployment targets.
 
 | Capability | Source state | Required verification or work |
 | --- | --- | --- |
@@ -14,3 +14,4 @@ This source revision is a partial implementation of the approved program. Earlie
 | Phone features | Explicitly excluded. | Separate future decision. |
 
 `scripts/ValidateCompactUi.ps1` passes source structure checks on this revision. Those checks do not compile or run the native application. The new C# integration tests are present but unrun. Use the earlier release evidence only for the earlier release, not for these source changes.
+

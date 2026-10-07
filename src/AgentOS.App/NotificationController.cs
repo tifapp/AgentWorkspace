@@ -1,4 +1,4 @@
-﻿using AgentOS.Core;
+using AgentOS.Core;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Automation.Peers;
@@ -34,7 +34,7 @@ public sealed class NotificationController:IDisposable
    selectedProject=project;selectedRoot=root;watcher.Select(project,root);
   }catch(Exception e)when(e is IOException or UnauthorizedAccessException or JsonException){}}
  void Deliver(LocalNotice notice)
- {if(disposed||!iconAdded)return;lastBalloon=notice;var data=BaseIcon();data.uFlags=NifInfo;data.szInfoTitle="Agent OS · "+notice.Kind;data.szInfo=notice.Title;data.dwInfoFlags=1;Shell_NotifyIcon(NimModify,ref data);}
+ {if(disposed||!iconAdded)return;lastBalloon=notice;var data=BaseIcon();data.uFlags=NifInfo;data.szInfoTitle="Agent OS � "+notice.Kind;data.szInfo=notice.Title;data.dwInfoFlags=1;Shell_NotifyIcon(NimModify,ref data);}
  void AddIcon()
  {var data=BaseIcon();data.uFlags=NifMessage|NifIcon|NifTip;iconAdded=Shell_NotifyIcon(NimAdd,ref data);if(iconAdded){data.uVersion=4;Shell_NotifyIcon(NimSetVersion,ref data);}}
  NOTIFYICONDATA BaseIcon()=>new(){cbSize=(uint)Marshal.SizeOf<NOTIFYICONDATA>(),hWnd=hwnd,uID=IconId,uCallbackMessage=Callback,hIcon=LoadIcon(0,(nint)32512),szTip="Agent OS",szInfo="",szInfoTitle=""};
@@ -51,14 +51,14 @@ public sealed class NotificationController:IDisposable
    AppendMenu(menu,0,1,"Show workspace");AppendMenu(menu,0,2,"Capture context");AppendMenu(menu,0,3,"Notification history");
    AppendMenu(menu,0x800,0,null);AppendMenu(menu,keepRunning?0x8u:0u,4,"Keep running in tray");AppendMenu(menu,0x800,0,null);AppendMenu(menu,0,5,"Stop work and exit");
    GetCursorPos(out var pt);SetForegroundWindow(hwnd);var result=TrackPopupMenu(menu,0x100|0x2,pt.X,pt.Y,0,hwnd,0);
-   switch(result){case 1:ShowWorkspace();break;case 2:ShowWorkspace();_=capture.OpenAsync();break;case 3:ShowHistory();break;case 4:keepRunning=!keepRunning;break;case 5:StopExit();break;}
+   switch(result){case 1:ShowWorkspace();break;case 2:_=capture.OpenAsync();break;case 3:ShowHistory();break;case 4:keepRunning=!keepRunning;break;case 5:StopExit();break;}
   }finally{DestroyMenu(menu);}}
  void ShowHistory()
  {if(historyWindow!=null){historyWindow.Activate();return;}
   var history=new Window{Title="Notification history"};history.AppWindow.Resize(new Windows.Graphics.SizeInt32(600,500));
   var panel=new StackPanel{Spacing=8,Padding=new Thickness(16)};var heading=new TextBlock{Text="Notification history",FontSize=22};AutomationProperties.SetHeadingLevel(heading,AutomationHeadingLevel.Level1);panel.Children.Add(heading);
   var notices=center.History.Reverse().ToArray();if(notices.Length==0)panel.Children.Add(new TextBlock{Text="No notifications yet."});
-  foreach(var notice in notices){var label=$"{notice.At.ToLocalTime():g} · {notice.Kind} · {notice.Title}";
+  foreach(var notice in notices){var label=$"{notice.At.ToLocalTime():g} � {notice.Kind} � {notice.Title}";
    var button=new Button{Content=label,HorizontalAlignment=HorizontalAlignment.Stretch,HorizontalContentAlignment=HorizontalAlignment.Left};AutomationProperties.SetName(button,label);
    button.Click+=(_,_)=>OpenNotice(notice);panel.Children.Add(button);}
   history.Content=new ScrollViewer{Content=panel,VerticalScrollBarVisibility=ScrollBarVisibility.Auto};history.Closed+=(_,_)=>historyWindow=null;historyWindow=history;history.Activate();}
@@ -97,5 +97,6 @@ public sealed class NotificationController:IDisposable
  [DllImport("user32.dll")]static extern bool GetCursorPos(out POINT point);
  [DllImport("user32.dll")]static extern bool SetForegroundWindow(nint hwnd);
 }
+
 
 

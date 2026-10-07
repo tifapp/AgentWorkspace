@@ -106,22 +106,44 @@ public sealed class CaptureController : IDisposable
     {
         if (message == WmHotkey && (int)wparam == HotkeyId)
         {
-            _queue.TryEnqueue(() => { if (!_disposed) _ = OpenAsync(); });
+            _queue.TryEnqueue(() => { if (!_disposed) _ = OpenAsync(fromGlobalHotkey: true); });
             return 0;
         }
         return DefSubclassProc(hwnd, message, wparam, lparam);
     }
 
-    public async Task OpenAsync()
+    public async Task OpenAsync(bool fromGlobalHotkey = false)
     {
         if (_disposed || _dialog != null) return;
-        var result = _tracker.CaptureLastExternal();
+        var result = fromGlobalHotkey ? _tracker.CaptureLastExternal() : await CaptureRetainedExternalAsync();
+        _window.AppWindow.Show();
+        _window.Activate();
         var dialog = new CaptureDialog(result, SaveAsync, StartAsync, _closing.Token);
         _dialog = dialog;
         try { await dialog.ShowAsync(_window.Content.XamlRoot, _hotkey.Status); }
         finally { if (ReferenceEquals(_dialog, dialog)) _dialog = null; dialog.Dispose(); }
     }
 
+    private async Task<CaptureResult> CaptureRetainedExternalAsync()
+    {
+        var expected = _tracker.LastExternalHandle;
+        if (expected == 0) return new(CaptureStatus.NoExternalWindow, null, "No retained external window is available. Focus the source application and retry capture.");
+        if (GetForegroundWindow() != expected && !SetForegroundWindow(expected)) return new(CaptureStatus.Unavailable, null, "The retained source window could not be activated. Focus it and use the global capture shortcut.");
+        for (var attempt = 0; attempt < 8 && GetForegroundWindow() != expected; attempt++)
+            await Task.Delay(25, _closing.Token);
+        if (GetForegroundWindow() != expected || _tracker.LastExternalHandle != expected)
+            return new(CaptureStatus.Unavailable, null, "The retained source window did not become foreground. No screenshot was taken.");
+        var result = _tracker.CaptureLastExternal();
+        if (result.Context != null && result.Context.Window.Handle != expected)
+            return new(CaptureStatus.Unavailable, null, "The foreground changed during capture. Discarded the result.");
+        return result;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetForegroundWindow(nint hwnd);
+    [DllImport("user32.dll")]
+    private static extern nint GetForegroundWindow();
     private async Task<TaskMap> SaveAsync(TaskMap draft, CancellationToken cancel)
     {
         var project = draft.ProjectPath;
@@ -170,6 +192,9 @@ public sealed class CaptureController : IDisposable
     [DllImport("comctl32.dll")]
     private static extern nint DefSubclassProc(nint hwnd, uint message, nuint wparam, nint lparam);
 }
+
+
+
 
 
 
