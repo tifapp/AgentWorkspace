@@ -67,6 +67,7 @@ static WorkUnit Work(ProjectRuntime runtime, string id) => runtime.Snapshot.Work
 async Task TestAsync(string name, Func<Task> check) => await Test(name, check);
 await UpdateProtocolChecks.Run(Test, NewRuntime, root);
 await AgentOS.Tests.ConflictBehaviorChecks.RunAsync(Test, Path.Combine(root, "conflict-behavior"));
+  await AgentOS.Tests.ConflictContinuityChecks.RunAsync(Test, Path.Combine(root, "conflict-continuity"));
 
 // Feature helpers are independent gates. Missing concurrent helpers are reported, never counted as passes.
 await TestAsync("Resource admission and VM refusal", AgentOS.Tests.ResourceAdmissionChecks.RunAsync);
@@ -939,4 +940,5 @@ internal sealed class RepeatedContentionHost(string project) : IWorkHost
         return new(0, true, null);
     }
 }
+
 

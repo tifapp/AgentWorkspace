@@ -277,15 +277,27 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
             await _profile.Revalidate();
             var current = (await Commands.Git(project, "rev-parse", IntegratedRef)).Checked();
             await PrivateGit.VerifyTree(project,current);
-            var resolvedPaths = _state.Conflicts.Where(x => x.WorkId == work.Id && x.ResolutionRequested && !x.Resolved && !x.Abandoned).SelectMany(x => x.Paths).ToHashSet(StringComparer.Ordinal);
+            var resolvedPaths = _state.Conflicts.Where(x => x.WorkId == work.Id && x.ResolutionRequested && !x.Resolved && !x.Abandoned).SelectMany(x => x.Paths.Except(x.SupersededPaths)).ToHashSet(StringComparer.Ordinal);
             // Check the complete path identity, including mode and blob, after ownership is acquired.
+            var exactResultPaths = new HashSet<string>(StringComparer.Ordinal);
+            var supersededResolvedPaths = new List<string>();
+            foreach (var notice in _state.Conflicts.Where(x => x.WorkId == work.Id && x.ResolutionRequested && !x.Resolved && !x.Abandoned))
+                foreach (var path in notice.Paths.Except(notice.SupersededPaths))
+                {
+                    var atNotice = (await Commands.Git(project, "ls-tree", "-z", notice.CurrentCommit, "--", path)).Checked();
+                    var now = (await Commands.Git(project, "ls-tree", "-z", current, "--", path)).Checked();
+                    var desired = (await Commands.Git(project, "ls-tree", "-z", work.CandidateCommit!, "--", path)).Checked();
+                    if (atNotice != now && desired != now) supersededResolvedPaths.Add(path);
+                    else if (desired == now) exactResultPaths.Add(path);
+                }
+            if (supersededResolvedPaths.Count > 0) { await RecordConflict(work, "TouchedPathChanged", supersededResolvedPaths, current); return; }
             var changedTouchedPaths = new List<string>();
             foreach (var path in work.ChangedPaths)
             {
                 if (resolvedPaths.Contains(path)) continue;
                 var before = (await Commands.Git(project, "ls-tree", "-z", work.BaseCommit, "--", path)).Checked();
                 var now = (await Commands.Git(project, "ls-tree", "-z", current, "--", path)).Checked();
-                if (before != now) changedTouchedPaths.Add(path);
+                if (before != now) { var desired = (await Commands.Git(project, "ls-tree", "-z", work.CandidateCommit!, "--", path)).Checked(); if (desired == now) exactResultPaths.Add(path); else changedTouchedPaths.Add(path); }
             }
             if (changedTouchedPaths.Count > 0) { await RecordConflict(work, "TouchedPathChanged", changedTouchedPaths, current); return; }
             var index = Path.Combine(_store.Root, "integrate-" + Guid.NewGuid().ToString("N") + ".index");
@@ -297,14 +309,14 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
                 // to a private index of current; no fuzzy/three-way content merge is authorized.
                 // This also handles directory/file replacements on older Git versions.
                 (await Commands.RunAsync("git", ["read-tree", current], project, token, environment: env)).Checked();
-                var patchPaths = work.ChangedPaths.Where(x => !resolvedPaths.Contains(x)).ToArray();
+                var patchPaths = work.ChangedPaths.Where(x => !resolvedPaths.Contains(x) && !exactResultPaths.Contains(x)).ToArray();
                 var patch = await Commands.Git(project, (new[] { "diff", "--binary", "--full-index", "--no-renames", "--no-ext-diff", "--no-textconv", work.BaseCommit, work.CandidateCommit!, "--" }).Concat(patchPaths).ToArray());
                 patch.Checked();
                 var merged = patchPaths.Length == 0 ? new CommandResult(0, "", "") :
                     await Commands.RunAsync("git", ["apply", "--cached", "--binary", "--whitespace=nowarn"], project, token, input: patch.Output, environment: env);
                 if (merged.ExitCode == 0)
                 {
-                    try { await StageResolvedPaths(work, resolvedPaths, env, token); }
+                    try { await StageResolvedPaths(work, resolvedPaths.Except(exactResultPaths, StringComparer.Ordinal).ToHashSet(StringComparer.Ordinal), env, token); }
                     catch (Exception e) when (e is IOException or InvalidDataException) { await RecordConflict(work, "ExactPatchFailure", work.ChangedPaths, current); return; }
                 }
                 var written = await Commands.RunAsync("git", ["write-tree"], project, token, environment: env);
@@ -334,7 +346,7 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
             Mutate(() =>
             {
                 work.IntegratedCommit = commit; work.PendingCommit = null; _state.IntegratedCommit = commit;
-                foreach (var notice in _state.Conflicts.Where(x => x.WorkId == work.Id && x.ResolutionRequested && !x.Abandoned && x.Paths.All(work.ChangedPaths.Contains))) { notice.Resolved = true; notice.PublicationBlocked = false; }
+                foreach (var notice in _state.Conflicts.Where(x => x.WorkId == work.Id && x.ResolutionRequested && !x.Abandoned && x.Paths.Except(x.SupersededPaths).All(work.ChangedPaths.Contains))) { notice.Resolved = true; notice.PublicationBlocked = false; }
                 work.Status = _state.Conflicts.Any(x => x.WorkId == work.Id && !x.Resolved && !x.Abandoned) ? WorkStatus.Parked : WorkStatus.Completed; work.UpdatedAt = DateTimeOffset.UtcNow;
                 work.Detail = work.Status == WorkStatus.Parked ? "Independent edits were validated and integrated; original conflicting work remains parked with its private candidate." : "Validated and integrated into agent-os/integrated. Your checked-out branch has not been switched.";
                 UpdateMapStatuses(); Event(work.Id, work.Status == WorkStatus.Parked ? "PartialPublication" : "Completed", work.Detail);
@@ -563,6 +575,8 @@ public sealed partial class ProjectRuntime : IAsyncDisposable
         _lifetime.Dispose(); _projectLock.Dispose(); _publication.Dispose(); _runtimeRegistration.Dispose();
     }
 }
+
+
 
 
 

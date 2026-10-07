@@ -9,7 +9,7 @@ public sealed partial class ProjectRuntime
         var notice = new ConflictNotice { WorkId = work.Id, Cause = cause, Paths = affected, BaseCommit = work.BaseCommit, CurrentCommit = current, HolderWorkId = holder?.Id, DeferredCandidateCommit = work.CandidateCommit };
         if (notice.DeferredCandidateCommit != null)
             (await Commands.Git(_state.ProjectPath, "update-ref", "refs/agent-os/deferred/" + notice.Id, notice.DeferredCandidateCommit, new string('0', notice.DeferredCandidateCommit.Length))).Checked();
-        Mutate(() => { _state.Conflicts.Add(notice); work.Status = WorkStatus.NeedsResponse; work.Detail = $"Conflict {notice.Id}: {cause}. Publication blocked; candidate retained. Respond through respond_to_conflict."; work.UpdatedAt = DateTimeOffset.UtcNow; UpdateMapStatuses(); Event(work.Id, "Conflict", work.Detail); });
+        Mutate(() => { foreach (var older in _state.Conflicts.Where(x => x.WorkId == work.Id && !x.Resolved && !x.Abandoned)) foreach (var path in affected.Where(older.Paths.Contains)) if (!older.SupersededPaths.Contains(path)) older.SupersededPaths.Add(path); _state.Conflicts.Add(notice); work.Status = WorkStatus.NeedsResponse; work.Detail = $"Conflict {notice.Id}: {cause}. Publication blocked; candidate retained. Respond through respond_to_conflict."; work.UpdatedAt = DateTimeOffset.UtcNow; UpdateMapStatuses(); Event(work.Id, "Conflict", work.Detail); });
     }
     private ConflictNotice FindConflict(string workId, string conflictId)
     {
@@ -56,7 +56,8 @@ public sealed partial class ProjectRuntime
     }
     internal void MarkPeerDelivered(string toWorkId, string messageId)
     {
-        Mutate(() => { var item = _state.PeerMessages.Single(x => x.Id == messageId && x.ToWorkId == toWorkId); item.DeliveredAt ??= DateTimeOffset.UtcNow; Event(toWorkId, "PeerDelivered", $"Message {messageId} delivered."); });
+        if (!HasLiveTask(toWorkId)) throw new InvalidOperationException("Peer target ended before delivery.");
+        Mutate(() => { var item = _state.PeerMessages.Single(x => x.Id == messageId && x.ToWorkId == toWorkId); if (item.DeliveredAt == null) { item.DeliveredAt = DateTimeOffset.UtcNow; Event(toWorkId, "PeerDelivered", $"Message {messageId} delivered."); } });
     }
     public InterruptRequest InterruptManagedTask(string fromWorkId, string targetWorkId, string reason)
     {
@@ -73,11 +74,17 @@ public sealed partial class ProjectRuntime
         if (string.IsNullOrWhiteSpace(explanation)) throw new ArgumentException("Escalation explanation is required.");
         var notice = FindConflict(workId, conflictId);
         if (notice.Response == null) throw new InvalidOperationException("Respond first.");
-        var item = new HumanEscalation { WorkId = workId, ConflictId = notice.Id, Explanation = explanation.Trim() };
-        Mutate(() => { _state.Escalations.Add(item); Event(workId, "HumanEscalation", item.Explanation); });
-        return JsonFormat.Copy(item);
-    }
-    internal void RecordHostThread(string workId, string threadId)
+        HumanEscalation? item = null;
+        Mutate(() =>
+        {
+            item = _state.Escalations.FirstOrDefault(x => x.WorkId == workId && x.ConflictId == notice.Id && x.Explanation == explanation.Trim());
+            if (item != null) return;
+            item = new HumanEscalation { WorkId = workId, ConflictId = notice.Id, Explanation = explanation.Trim() };
+            _state.Escalations.Add(item);
+            Event(workId, "HumanEscalation", item.Explanation);
+        });
+        return JsonFormat.Copy(item!);
+    }    internal void RecordHostThread(string workId, string threadId)
     {
         if (string.IsNullOrWhiteSpace(threadId)) throw new InvalidDataException("Codex did not provide a thread identity.");
         Mutate(() => Find(workId).ThreadId = threadId);
@@ -119,7 +126,7 @@ public sealed partial class ProjectRuntime
         }
         foreach (var notice in unresolved.Where(x => x.ResolutionRequested))
         {
-            foreach (var path in notice.Paths)
+            foreach (var path in notice.Paths.Except(notice.SupersededPaths))
             {
                 var original = (await Commands.Git(_state.ProjectPath, "ls-tree", "-z", notice.DeferredCandidateCommit!, "--", path)).Checked();
                 var revised = (await Commands.Git(_state.ProjectPath, "ls-tree", "-z", work.CandidateCommit!, "--", path)).Checked();
@@ -131,7 +138,7 @@ public sealed partial class ProjectRuntime
                 }
             }
         }
-        var excluded = deferred.Where(x => x.Abandoned || !x.ResolutionRequested).SelectMany(x => x.Paths).ToHashSet(StringComparer.Ordinal);
+        var excluded = deferred.Where(x => x.Abandoned || !x.ResolutionRequested).SelectMany(x => x.Paths.Except(x.SupersededPaths)).ToHashSet(StringComparer.Ordinal);
         var allPaths = work.ChangedPaths.ToList();
         var alreadyPublished = new HashSet<string>(StringComparer.Ordinal);
         foreach (var path in allPaths)
@@ -190,3 +197,5 @@ public sealed partial class ProjectRuntime
         }
     }
 }
+
+

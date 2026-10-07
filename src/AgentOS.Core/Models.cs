@@ -83,6 +83,7 @@ public sealed class ConflictNotice
     public string Cause { get; set; } = "";
     public bool PublicationBlocked { get; set; } = true;
     public List<string> Paths { get; set; } = [];
+    public List<string> SupersededPaths { get; set; } = [];
     public string BaseCommit { get; set; } = "";
     public string CurrentCommit { get; set; } = "";
     public string? HolderWorkId { get; set; }
@@ -170,3 +171,4 @@ public static class JsonFormat
     };
     public static T Copy<T>(T value) => JsonSerializer.Deserialize<T>(JsonSerializer.Serialize(value, Options), Options)!;
 }
+

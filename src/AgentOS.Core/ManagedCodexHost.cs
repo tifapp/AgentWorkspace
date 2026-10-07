@@ -13,6 +13,32 @@ internal sealed class ManagedCodexHost : IWorkHost
     internal static object TurnParameters(string threadId, ContextTurnPayload payload) => new { threadId, input = payload.Input, additionalContext = payload.AdditionalContext };
     internal static object TurnParameters(string threadId, string text) => new { threadId, input = new[] { new { type = "text", text } } };
     internal static object SteeringParameters(string threadId, string turnId, string text) => new { threadId, expectedTurnId = turnId, input = new[] { new { type = "text", text } } };
+    internal static async Task DeliverPendingPeerMessagesAsync(ProjectRuntime runtime, string workId, Func<PeerMessage, Task> deliver, Action<string> output)
+    {
+        foreach (var message in runtime.PendingPeerMessages(workId))
+        {
+            try { await deliver(message); runtime.MarkPeerDelivered(workId, message.Id); }
+            catch { output($"Peer message {message.Id} remains queued in durable project state."); }
+        }
+    }
+    internal static async Task<HostResult> RunContinuationLoopAsync(WorkUnit work, ProjectRuntime runtime, string thread, string initialInput, Func<string,Task<bool>> executeTurn, Action<string> output, Func<string?> report, Func<string?> model, CancellationToken cancel)
+    {
+        var nextInput = initialInput;
+        for (;;)
+        {
+            cancel.ThrowIfCancellationRequested();
+            var wasOwed = runtime.Snapshot.Conflicts.Any(x => x.WorkId == work.Id && !x.Resolved && !x.Abandoned && x.Response == null);
+            if (!await executeTurn(nextInput)) return new(1, false, thread, report(), model());
+            var notice = await runtime.AfterManagedTurnAsync(work.Id, cancel);
+            if (notice == null) return new(0, true, thread, report(), model());
+            if (wasOwed && runtime.RegisterConflictNonresponse(work.Id) >= 2)
+            {
+                output("Conflict response remains owed after repeated turns. Work is durably NeedsResponse.");
+                return new(0, true, thread, report(), model());
+            }
+            nextInput = notice;
+        }
+    }
     public async Task<string> Version(string executable)
     {
         var version = await new CodexHost().Version(executable);
@@ -268,10 +294,9 @@ internal sealed class ManagedCodexHost : IWorkHost
             thread = started.GetProperty("thread").GetProperty("id").GetString();
             Runtime?.RecordHostThread(work.Id, thread!);
             if (started.TryGetProperty("model", out var actualModel)) model = actualModel.GetString();
-            string nextInput = !resuming ? work.Task : ProjectRuntime.ContinuationPrompt(Runtime!.Snapshot.Conflicts.First(x => x.WorkId == work.Id && !x.Resolved && !x.Abandoned));
-            for (;;)
+            var initialInput = !resuming ? work.Task : ProjectRuntime.ContinuationPrompt(Runtime!.Snapshot.Conflicts.First(x => x.WorkId == work.Id && !x.Resolved && !x.Abandoned));
+            async Task<bool> ExecuteTurn(string nextInput)
             {
-                var wasOwed = Runtime?.Snapshot.Conflicts.Any(x => x.WorkId == work.Id && !x.Resolved && !x.Abandoned && x.Response == null) ?? false;
                 finished = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
                 var parameters=!resuming&&nextInput==work.Task&&work.ContextRefs.Count>0?TurnParameters(thread!,ContextTurnPayload.Build(nextInput,work.ContextRefs,new ContextArtifacts(Runtime?.DataDirectory??throw new InvalidOperationException("Project runtime unavailable.")))):TurnParameters(thread!,nextInput);
                 var turn = await Request("turn/start",parameters);
@@ -285,11 +310,9 @@ internal sealed class ManagedCodexHost : IWorkHost
                             try { await Request("turn/steer", SteeringParameters(thread!, activeTurn!, "[AgentOS steering message ID: " + item.Id + "]\n" + item.Text + "\nUse agent_os_ack_message with this ID after reading.")); Interactions!.Change(item.Id, InteractionStatus.Delivered, turnId: activeTurn); }
                             catch (Exception e) { try { Interactions!.Change(item.Id, InteractionStatus.Rejected, e.Message); } catch (InvalidOperationException) { } }
                         }
-                        foreach (var message in Runtime?.PendingPeerMessages(work.Id) ?? [])
-                        {
-                            try { await Request("turn/steer", SteeringParameters(thread!, activeTurn!, $"Peer message from {message.FromWorkId}: {message.Text}")); Runtime!.MarkPeerDelivered(work.Id, message.Id); }
-                            catch { output($"Peer message {message.Id} remains queued in durable project state."); }
-                        }
+                        if (Runtime != null)
+                            await DeliverPendingPeerMessagesAsync(Runtime, work.Id,
+                                message => Request("turn/steer", SteeringParameters(thread!, activeTurn!, $"Peer message from {message.FromWorkId}: {message.Text}")), output);
                         foreach(var peer in Interactions?.Inspect(work.Id).Where(x=>x.Kind==InteractionKind.Peer&&x.TargetWorkId==work.Id&&x.Status==InteractionStatus.Pending&&x.TurnId==null)??[])
                         {
                             try{await Request("turn/steer",SteeringParameters(thread!,activeTurn!,"[AgentOS peer request ID: "+peer.Id+"]\n"+peer.Text+"\nInspect agent_os_inbox and use agent_os_ack_peer to answer."));Interactions!.Change(peer.Id,InteractionStatus.Pending,turnId:activeTurn);}catch{ /* Inbox remains durable. */ }
@@ -299,16 +322,9 @@ internal sealed class ManagedCodexHost : IWorkHost
                 var ok = await finished.Task.WaitAsync(cancel);
                 try { await steering; } catch (OperationCanceledException) { }
                 await Task.WhenAll(tools.Values);
-                if (!ok) return new(1, false, thread, report, model);
-                var notice = Runtime == null ? null : await Runtime.AfterManagedTurnAsync(work.Id, cancel);
-                if (notice == null) return new(0, true, thread, report, model);
-                if (wasOwed && Runtime is not null && Runtime.RegisterConflictNonresponse(work.Id) >= 2)
-                {
-                    output("Conflict response remains owed after repeated turns. Work is durably NeedsResponse.");
-                    return new(0, true, thread, report, model);
-                }
-                nextInput = notice;
+                return ok;
             }
+            return await RunContinuationLoopAsync(work, Runtime!, thread!, initialInput, ExecuteTurn, output, () => report, () => model, cancel);
         }
         finally
         {

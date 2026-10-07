@@ -130,7 +130,7 @@ public sealed partial class ProjectRuntime
   var all = _interactions.Inspect();
   foreach (var wait in all.Where(x => x.Kind == InteractionKind.Wait && x.Status == InteractionStatus.Pending))
   {
-   if (wait.WaitKind == WaitKind.Task && wait.TargetWorkId != null && !Find(wait.TargetWorkId).IsActive)
+   if (wait.WaitKind == WaitKind.Task && wait.TargetWorkId != null && !HasLiveTask(wait.TargetWorkId))
     SetIfPending(wait.Id, InteractionStatus.Resolved, "Task ended: " + Find(wait.TargetWorkId).Status);
    else if (wait.WaitKind == WaitKind.Message)
    {
@@ -158,10 +158,11 @@ public sealed partial class ProjectRuntime
   if (string.IsNullOrWhiteSpace(response)) throw new ArgumentException("A reply is required.");
   return Task.FromResult(_interactions.Change(requestId, InteractionStatus.Replied, response));
  }
- public TaskInteraction AskPeer(string workId, string targetWorkId, string question, DateTimeOffset? deadline = null)
+ private bool HasLiveTask(string id) { var work = Find(id); return work.IsActive || (_jobs.TryGetValue(id, out var job) && !job.IsCompleted); }
+  public TaskInteraction AskPeer(string workId, string targetWorkId, string question, DateTimeOffset? deadline = null)
  {
   var sender = Find(workId); var target = Find(targetWorkId);
-  if (!sender.IsActive || !target.IsActive) throw new InvalidOperationException("Both peer tasks must be active.");
+  if (!HasLiveTask(workId) || !HasLiveTask(targetWorkId)) throw new InvalidOperationException("Both peer tasks must be active.");
   if (workId == targetWorkId) throw new ArgumentException("A task cannot ask itself.");
   if (string.IsNullOrWhiteSpace(question)||question.Length>16000) throw new ArgumentException("A peer request needs 1 to 16000 characters.");
   if (deadline.HasValue && (deadline.Value <= DateTimeOffset.UtcNow || deadline.Value > DateTimeOffset.UtcNow.AddDays(30))) throw new ArgumentException("Peer deadline has passed.");
@@ -169,14 +170,14 @@ public sealed partial class ProjectRuntime
  }
  public TaskInteraction AcknowledgePeer(string targetWorkId, string requestId, string response)
  {
-  if(!Find(targetWorkId).IsActive)throw new InvalidOperationException("Peer recipient is no longer active."); var item = _interactions.Get(requestId);
+  if(!HasLiveTask(targetWorkId))throw new InvalidOperationException("Peer recipient is no longer active."); var item = _interactions.Get(requestId);
   if (item.TargetWorkId != targetWorkId || item.Kind != InteractionKind.Peer || item.Status != InteractionStatus.Pending || string.IsNullOrWhiteSpace(response) || response.Length>16000) throw new InvalidOperationException("No pending peer request or valid response for this task.");
   return _interactions.Change(requestId, InteractionStatus.Acknowledged, response);
  }
  public TaskInteraction HandoffPeer(string targetWorkId, string requestId, string newTargetWorkId)
  {
   var current = Find(targetWorkId); var next = Find(newTargetWorkId);
-  if (!current.IsActive || !next.IsActive || targetWorkId == newTargetWorkId) throw new InvalidOperationException("Peer handoff requires another active task.");
+  if (!HasLiveTask(targetWorkId) || !HasLiveTask(newTargetWorkId) || targetWorkId == newTargetWorkId) throw new InvalidOperationException("Peer handoff requires another active task.");
   return _interactions.Reassign(requestId, targetWorkId, newTargetWorkId);
  }
  public TaskInteraction ResolveWait(string workId, string waitId, string resolution)
@@ -198,7 +199,7 @@ public sealed partial class ProjectRuntime
  public TaskInteraction ProposeFollowup(string workId,string task,bool required)
  {
   if(string.IsNullOrWhiteSpace(task)||task.Length>16000)throw new ArgumentException("Followup task must contain 1 to 16000 characters.");TaskInteraction proposal;
-  lock(_sync){if(!Find(workId).IsActive)throw new InvalidOperationException("Only an active task can propose followup work.");proposal=_interactions.AddFollowup(workId,task.Trim(),required);UpdateMapStatuses();Save();}
+  lock(_sync){if(!HasLiveTask(workId))throw new InvalidOperationException("Only an active task can propose followup work.");proposal=_interactions.AddFollowup(workId,task.Trim(),required);UpdateMapStatuses();Save();}
   Changed?.Invoke();return proposal;
  }
  public Task<string> AcceptFollowup(string workId,string proposalId)
@@ -218,7 +219,7 @@ public sealed partial class ProjectRuntime
  }
  public TaskInteraction CreateWait(string workId, WaitKind kind, string targetId, DateTimeOffset? deadline = null)
  {
-  if (!Find(workId).IsActive) throw new InvalidOperationException("Only active tasks can create waits."); if (string.IsNullOrWhiteSpace(targetId)) throw new ArgumentException("Wait target is required.");
+  if (!HasLiveTask(workId)) throw new InvalidOperationException("Only active tasks can create waits."); if (string.IsNullOrWhiteSpace(targetId)) throw new ArgumentException("Wait target is required.");
   if (kind == WaitKind.Message && !_interactions.Inspect().Any(x => x.Id == targetId)) throw new ArgumentException("Message wait target does not exist.");
   if (kind == WaitKind.Decision && !Snapshot.Decisions.Any(x => x.Id == targetId)) throw new ArgumentException("Decision wait target does not exist.");
   if (deadline <= DateTimeOffset.UtcNow) throw new ArgumentException("Wait deadline has passed.");
@@ -231,7 +232,7 @@ public sealed partial class ProjectRuntime
    if (Reaches(targetId, [])) throw new InvalidOperationException("Wait dependency cycle.");
   }
   var wait = _interactions.Add(new TaskInteraction { WorkId = workId, TargetWorkId = kind == WaitKind.Task ? targetId : null, RelatedId = targetId, Kind = InteractionKind.Wait, WaitKind = kind, Status = InteractionStatus.Pending, Deadline = deadline });
-  if (kind == WaitKind.Task && !Find(targetId).IsActive) return _interactions.Change(wait.Id, InteractionStatus.Resolved, "Task ended: " + Find(targetId).Status);
+  if (kind == WaitKind.Task && !HasLiveTask(targetId)) return _interactions.Change(wait.Id, InteractionStatus.Resolved, "Task ended: " + Find(targetId).Status);
   if (kind == WaitKind.Message)
   {
    var message = _interactions.Get(targetId);
@@ -287,7 +288,7 @@ public sealed partial class ProjectRuntime
   while (item.Status == InteractionStatus.Pending)
   {
    cancel.ThrowIfCancellationRequested();
-   if (item.WaitKind == WaitKind.Task && item.TargetWorkId != null && !Find(item.TargetWorkId).IsActive)
+   if (item.WaitKind == WaitKind.Task && item.TargetWorkId != null && !HasLiveTask(item.TargetWorkId))
     return CompleteWaitIfPending(waitId, "Task ended: " + Find(item.TargetWorkId).Status);
    if (item.WaitKind == WaitKind.Message)
    {
@@ -306,3 +307,4 @@ public sealed partial class ProjectRuntime
   return item;
  }
 }
+

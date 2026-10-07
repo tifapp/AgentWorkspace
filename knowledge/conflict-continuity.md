@@ -1,0 +1,7 @@
+# Conflict continuity verification
+
+The executable scenarios are registered in `tests/AgentOS.Tests/ConflictContinuityChecks.cs` with individually filterable `Conflict ` names. They use `PracticeProject`, real Git refs and trees, and `ProjectRuntime` with deterministic script hosts. The managed `scripts/build.ps1 -Test` command currently returns `Access is denied` before .NET starts in the AppContainer; the pinned native SDK requester must compile and run the published commit.
+
+The continuation case calls the exact `ManagedCodexHost.RunContinuationLoopAsync` driver used by production `Run`, with scripted turn transport. It verifies bounded nonresponse, stored thread identity after restart, canceled and failed turns, and a later successful resolution. It does not start a real Codex app-server process. The validation-time race uses a real third task candidate and moves the Git shared ref from the validation command to reproduce a late external publication; the third task itself does not execute a concurrent runtime publication call because the runtime publication gate serializes that call.
+
+Peer delivery checks distinguish a queued durable message from an acknowledged peer request. A terminal target keeps an undelivered message queued after restart; `MarkPeerDelivered` now rejects that terminal target. The production peer pump is exercised with failed, successful, repeated, and target-ends-during-callback transports. Mode cases depend on Git preserving an index executable bit on Windows; native verification will establish that behavior.
