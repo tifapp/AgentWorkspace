@@ -12,7 +12,7 @@ public static class ExecutionProfileChecks
  static void CheckHelperScripts(string root)
  {
   var helpers=Path.Combine(root,"helpers");Directory.CreateDirectory(helpers);
-  File.WriteAllText(Path.Combine(helpers,"HostHelper.ps1"),HyperVSdkRunner.HostHelper);
+  File.WriteAllText(Path.Combine(helpers,"HostHelper.ps1"),HyperVExecution.HostHelper);
   File.WriteAllText(Path.Combine(helpers,"RecoveryHelper.ps1"),HyperVSdkRunner.RecoveryHelper);
   File.WriteAllText(Path.Combine(helpers,"Helper.ps1"),HyperVSdkRunner.Helper);
   var check=Path.Combine(root,"check-helper-ast.ps1");

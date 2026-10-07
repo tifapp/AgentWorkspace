@@ -61,6 +61,8 @@ public sealed class WorkInteractionsDialog
             if (item.Required) card.Children.Add(new TextBlock { Text = "Required obligation", TextWrapping = TextWrapping.Wrap });
             if (item.Deadline != null) card.Children.Add(new TextBlock { Text = "Due: " + item.Deadline.Value.LocalDateTime.ToString("g") });
             if (!string.IsNullOrWhiteSpace(item.Response)) card.Children.Add(new TextBlock { Text = "Response: " + item.Response, TextWrapping = TextWrapping.Wrap });
+            if (item.Kind == InteractionKind.Steering && item.Status == InteractionStatus.Delivered) card.Children.Add(new TextBlock { Text = "Delivered to the task turn; explicit agent acknowledgement is still pending.", TextWrapping = TextWrapping.Wrap });
+            if (item.Kind == InteractionKind.Steering && item.Status == InteractionStatus.Acknowledged) card.Children.Add(new TextBlock { Text = "The agent explicitly acknowledged this delivered message.", TextWrapping = TextWrapping.Wrap });
             if (item.Status == InteractionStatus.Pending)
             {
                 if (item.Kind == InteractionKind.Clarification)
@@ -81,7 +83,9 @@ public sealed class WorkInteractionsDialog
                 {
                     card.Children.Add(new TextBlock { Text = "Accepting starts a new child task. Proposals are never submitted automatically.", TextWrapping = TextWrapping.Wrap });
                     card.Children.Add(Command("Accept and start followup", async () => { await runtime.AcceptFollowup(item.WorkId, item.Id); }, "AcceptFollowup"));
-                    card.Children.Add(new TextBlock { Text = "Leave this proposal pending to decline for now; this runtime has no public rejection action.", TextWrapping = TextWrapping.Wrap });
+                    if (item.Required) card.Children.Add(new TextBlock { Text = "Rejecting this proposal leaves its required obligation pending. Resolve the obligation separately with a recorded resolution.", TextWrapping = TextWrapping.Wrap });
+                    var reason = Input("Reason for rejecting followup"); card.Children.Add(reason);
+                    card.Children.Add(Command("Reject followup", () => { runtime.RejectFollowup(item.WorkId, item.Id, Required(reason)); return Task.CompletedTask; }, "RejectFollowup"));
                 }
                 else if (item.Kind == InteractionKind.Obligation)
                 {
