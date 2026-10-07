@@ -9,22 +9,10 @@ internal static class FeatureIntegrationChecks
 
     public static async Task RunAsync(string root)
     {
-        var project = await PracticeProject.CreateAsync(root);
+        await CheckLegacyMapMigrationAsync(Path.Combine(root, "legacy-map"));
+        var project = await PracticeProject.CreateAsync(Path.Combine(root, "journal"));
         await using var runtime = await ProjectRuntime.OpenInternal(project, Path.Combine(root, "feature-state"), new ScriptHost(), Path.Combine(root, "coordination"));
-        runtime.Configure("Write-Output passed");
-        var node = new MapTask { Title = "Logical task", Prompt = "Write-Output work", Acceptance = "Done", Selected = true };
-        var mapId = runtime.SaveDraftMap(new AgentOS.Core.TaskMap { Title = "Attempts", Tasks = [node] });
         var state = (ProjectState)typeof(ProjectRuntime).GetField("_state", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(runtime)!;
-        var first = new WorkUnit { ExternalRequestId = node.Id, Status = WorkStatus.Stale };
-        var revision = new WorkUnit { ParentId = first.Id, Status = WorkStatus.Completed };
-        var followup = new WorkUnit { ParentId = revision.Id, Status = WorkStatus.Completed, Task = "Separate followup" };
-        state.Work.AddRange([first, revision, followup]);
-        typeof(ProjectRuntime).GetMethod("UpdateMapStatuses", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(runtime, null);
-        var mapped = state.Maps.Single(x => x.Id == mapId).Tasks.Single();
-        Check(mapped.Status == MapTaskStatus.Completed, "Successful revision did not complete its logical map task.");
-        Check(mapped.WorkIds.SequenceEqual([first.Id, revision.Id]), "Unrelated followup changed the logical attempt history.");
-        Check(first.Status == WorkStatus.Stale && revision.Status == WorkStatus.Completed && followup.Status == WorkStatus.Completed, "Updating the map rewrote completed work history.");
-
         var interactions = (TaskInteractionStore)typeof(ProjectRuntime).GetField("_interactions", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(runtime)!;
         var owner = new WorkUnit { Status = WorkStatus.Running };
         var peer = new WorkUnit { Status = WorkStatus.Running };
@@ -50,6 +38,31 @@ internal static class FeatureIntegrationChecks
         Check(reopened.Get(queued.Id).Status == InteractionStatus.Rejected, "Orphaned steering replayed after restart.");
         Check(reopened.Get(obligation.Id).Status == InteractionStatus.Pending, "Required obligation was lost on recovery.");
         Check(reopened.Get(clarification.Id).Status == InteractionStatus.Replied, "Completed reply changed on recovery.");
+    }
+
+    private static async Task CheckLegacyMapMigrationAsync(string root)
+    {
+        var project = await PracticeProject.CreateAsync(root);
+        await using var runtime = await ProjectRuntime.OpenInternal(project, Path.Combine(root, "feature-state"), new ScriptHost(), Path.Combine(root, "coordination"));
+        runtime.Configure("Write-Output passed");
+        var node = new MapTask { Title = "Logical task", Prompt = "Write-Output work", Acceptance = "Done", Selected = true };
+        var mapId = runtime.SaveDraftMap(new AgentOS.Core.TaskMap { Title = "Attempts", Tasks = [node] });
+        var state = (ProjectState)typeof(ProjectRuntime).GetField("_state", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(runtime)!;
+        var first = new WorkUnit { ExternalRequestId = node.Id, Status = WorkStatus.Stale };
+        var revision = new WorkUnit { ParentId = first.Id, Status = WorkStatus.Completed };
+        var followup = new WorkUnit { ParentId = revision.Id, Status = WorkStatus.Completed, Task = "Separate followup" };
+        state.Work.AddRange([first, revision, followup]);
+        typeof(ProjectRuntime).GetMethod("UpdateMapStatuses", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(runtime, null);
+        var map = state.Maps.Single(x => x.Id == mapId);
+        var mapped = map.Tasks.Single(x => x.Id == node.Id);
+        var followupNode = map.Tasks.Single(x => x.WorkIds.Contains(followup.Id));
+        Check(mapped.Status == MapTaskStatus.Completed, "Successful revision did not complete its logical map task.");
+        Check(mapped.WorkIds.SequenceEqual([first.Id, revision.Id]), "Unrelated followup changed the logical attempt history.");
+        Check(followupNode.Id != node.Id, "Separate followup reused the original logical node.");
+        Check(followupNode.WorkId == followup.Id, "Separate followup node lost its work ID.");
+        Check(followupNode.WorkIds.SequenceEqual([followup.Id]), "Separate followup lost its own work history.");
+        Check(map.Edges.Any(x => x.Kind == MapEdgeKind.Followup && x.FromTaskId == node.Id && x.ToTaskId == followupNode.Id), "Separate followup lost its map edge.");
+        Check(first.Status == WorkStatus.Stale && revision.Status == WorkStatus.Completed && followup.Status == WorkStatus.Completed, "Updating the map rewrote completed work history.");
     }
 }
 
