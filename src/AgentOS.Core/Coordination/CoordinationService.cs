@@ -13,6 +13,7 @@ public sealed class CoordinationService : IDisposable
     private readonly CoordinationMessaging _messaging;
     private readonly CoordinationEvidence _evidence;
     private readonly CoordinationPresentation _presentation;
+    private readonly CoordinationAdmission _admission;
 
     /// <summary>Opens a fresh root for a trusted in-process host.</summary>
     public CoordinationService(string root) : this(root, null, null) { }
@@ -27,6 +28,7 @@ public sealed class CoordinationService : IDisposable
             _actions = new CoordinationActions(_store, _identity);
             _messaging = new CoordinationMessaging(_store, _identity);
             _evidence = new CoordinationEvidence(_store);
+            _admission = new CoordinationAdmission(_store, _identity);
             _presentation = new CoordinationPresentation(_store);
             _store.AfterCommit = () => _presentation.RebuildRegistry();
             _store.AfterCommitFailed = error => _presentation.RecordFailure(error);
@@ -61,6 +63,11 @@ public sealed class CoordinationService : IDisposable
     public MessageDetail ReadMessage(string id) => _messaging.ReadMessage(id);
     public IReadOnlyList<(string MessageId,string Recipient,string State)> InspectOutbox() => _messaging.InspectOutbox();
     public Registry Snapshot() => _presentation.Snapshot();
+    public AdmissionDetail RequestResources(Actor actor, IReadOnlyList<ResourceRequest> resources, string key) => _admission.Request(actor, resources, key);
+    public AdmissionDetail ReadAdmission(Actor actor, string id) => _admission.Read(actor, id);
+    public IReadOnlyList<AdmissionDetail> ListAdmissions(Actor actor) => _admission.List(actor);
+    public AdmissionDetail ReleaseResources(Actor actor, string id, long expectedRevision, string key) => _admission.Finish(actor, id, expectedRevision, key, false);
+    public AdmissionDetail CancelAdmission(Actor actor, string id, long expectedRevision, string key) => _admission.Finish(actor, id, expectedRevision, key, true);
     /// <summary>Retries the disposable registry projection after an export failure.</summary>
     public ExportHealth RebuildRegistry() => _presentation.RebuildRegistry();
     public void Dispose() => _store.Dispose();

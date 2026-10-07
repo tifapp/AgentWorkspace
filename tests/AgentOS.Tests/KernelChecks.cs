@@ -107,7 +107,7 @@ internal static class KernelChecks
         await test("Kernel rejects legacy, unsupported and corrupt roots without import",()=>{
             foreach(var name in new[]{"state.json","journal.json"}){var path=Fresh(root,"legacy");var file=Path.Combine(path,name);File.WriteAllText(file,"old bytes");Refuses<InvalidOperationException>(()=>new CoordinationService(path));Check(File.ReadAllText(file)=="old bytes"&&!File.Exists(Path.Combine(path,"coordination.sqlite")),"Legacy state changed.");}
             var bad=Fresh(root,"corrupt");var db=Path.Combine(bad,"coordination.sqlite");File.WriteAllText(db,"not sqlite");Refuses<Exception>(()=>new CoordinationService(bad));Check(File.ReadAllText(db)=="not sqlite","Corrupt DB changed.");
-            foreach(var pragma in new[]{"user_version=99","application_id=123"}){
+            foreach(var pragma in new[]{"user_version=1","user_version=99","application_id=123"}){
                 var unsupported=Fresh(root,"unsupported");using(var initialized=new CoordinationService(unsupported)){}
                 var versionDb=Path.Combine(unsupported,"coordination.sqlite");SetPragma(versionDb,pragma);var before=File.ReadAllBytes(versionDb);
                 Refuses<InvalidDataException>(()=>new CoordinationService(unsupported));
@@ -122,6 +122,125 @@ internal static class KernelChecks
                 var next=service.Register("new-incarnation","stable","group");Check(next.Id!=session.Id&&Guid.TryParse(next.Id,out _),"Intentional new registration reused incarnation.");}
             return Task.CompletedTask;
         });
+        await AdmissionTests(test,root);
+    }
+    private static async Task AdmissionTests(Func<string,Func<Task>,Task> test,string root)
+    {
+        await test("Kernel admission bundles FIFO independent and owner auth",()=>{
+            var dir=Fresh(root,"admission");using var service=new CoordinationService(dir);
+            var a=service.Authenticate(service.Register("a"));var b=service.Authenticate(service.Register("b"));var c=service.Authenticate(service.Register("c"));
+            ResourceRequest R(string id,string mode)=>new("id:"+id,mode);
+            Refuses<ArgumentException>(()=>service.RequestResources(a,[new ResourceRequest(null!,"read")],"invalid-null"));
+            var first=service.RequestResources(a,[R("x","write"),R("y","write")],"first");
+            Check(first.State=="admitted"&&Guid.TryParse(first.Id,out _),"Bundle was not admitted.");
+            var generation=service.Snapshot().Generation;
+            var waiting=service.RequestResources(b,[R("x","read"),R("z","write")],"waiting");
+            Check(waiting.State=="pending"&&service.Snapshot().Generation==generation&&service.Snapshot().Entries.Single(e=>e.Id==b.Address).Holds.Count==0,"Pending bundle projected a partial hold, including its free resource.");
+            var reader=service.RequestResources(c,[R("x","read")],"reader");
+            Check(reader.State=="pending"&&service.Snapshot().Generation==generation,"Reader passed older overlapping request.");
+            var independent=service.RequestResources(c,[R("other","write")],"independent");
+            Check(independent.State=="admitted","Independent scope did not progress.");
+            Refuses<UnauthorizedAccessException>(()=>service.ReleaseResources(c,first.Id,1,"forge"));
+            Refuses<UnauthorizedAccessException>(()=>service.ReadAdmission(c,first.Id));
+            Refuses<InvalidOperationException>(()=>service.RequestResources(a,[R("x","read")],"upgrade"));
+            var retry=service.RequestResources(a,[R("x","write"),R("y","write")],"first");
+            Check(retry.Id==first.Id&&retry.State==first.State&&retry.Revision==first.Revision&&retry.Resources.SequenceEqual(first.Resources),"Duplicate request changed original receipt.");
+            Refuses<InvalidOperationException>(()=>service.RequestResources(a,[R("x","read")],"first"));
+            service.ReleaseResources(a,first.Id,1,"release");
+            Check(service.ReadAdmission(b,waiting.Id).State=="admitted"&&service.ReadAdmission(c,reader.Id).State=="admitted","Compatible readers were not promoted.");
+            Check(service.Snapshot().Entries.Single(e=>e.Id==c.Address).Holds.Count==2,"Other bundle hold was lost.");
+            service.ReleaseResources(c,reader.Id,2,"release-reader");
+            Check(service.Snapshot().Entries.Single(e=>e.Id==c.Address).Holds.ContainsKey("id:other"),"Bundle release removed unrelated hold.");
+            return Task.CompletedTask;
+        });
+        await test("Kernel older writer blocks newer reader",()=>{
+            using var service=new CoordinationService(Fresh(root,"admission-writer-fifo"));
+            var a=service.Authenticate(service.Register("a"));var b=service.Authenticate(service.Register("b"));var c=service.Authenticate(service.Register("c"));
+            var first=service.RequestResources(a,[new("id:shared","read")],"reader-a");
+            var writer=service.RequestResources(b,[new("id:shared","write")],"writer");
+            var later=service.RequestResources(c,[new("id:shared","read")],"reader-c");
+            Check(writer.State=="pending"&&later.State=="pending","New reader passed queued writer.");
+            service.ReleaseResources(a,first.Id,1,"release-a");
+            Check(service.ReadAdmission(b,writer.Id).State=="admitted"&&service.ReadAdmission(c,later.Id).State=="pending","FIFO writer was skipped.");
+            service.ReleaseResources(b,writer.Id,2,"release-b");
+            Check(service.ReadAdmission(c,later.Id).State=="admitted","Reader failed to wake after writer release.");
+            return Task.CompletedTask;
+        });
+        await test("Kernel admission path boundaries and alias refusal",()=>{
+            var rootPath=Fresh(root,"admission-paths");
+            var parent=Path.Combine(rootPath,"parent");var sibling=Path.Combine(rootPath,"parent2");
+            Directory.CreateDirectory(parent);Directory.CreateDirectory(sibling);
+            var child=Path.Combine(parent,"child.txt");File.WriteAllText(child,"x");
+            var other=Path.Combine(sibling,"other.txt");File.WriteAllText(other,"y");
+            using var service=new CoordinationService(Fresh(root,"admission-path-store"));
+            var a=service.Authenticate(service.Register("a"));var b=service.Authenticate(service.Register("b"));
+            var c=service.Authenticate(service.Register("c"));
+            var dirHold=service.RequestResources(a,[new("file:"+parent,"write")],"dir");
+            Check(service.RequestResources(b,[new("file:"+child.ToUpperInvariant().Replace('\\','/'),"read")],"child").State=="pending","Case and slash alias escaped directory hold.");
+            var shortBuffer=new System.Text.StringBuilder(32768);
+            var shortLength=GetShortPathName(child,shortBuffer,(uint)shortBuffer.Capacity);
+            if(shortLength>0&&shortLength<shortBuffer.Capacity&&!string.Equals(shortBuffer.ToString(),child,StringComparison.OrdinalIgnoreCase))
+                Check(service.RequestResources(c,[new("file:"+shortBuffer,"read")],"short-alias").State=="pending","Short directory alias escaped held scope.");
+            else Console.WriteLine("SKIP 8.3 alias fixture: short path unavailable.");
+            Check(service.RequestResources(b,[new("file:"+other,"write")],"sibling").State=="admitted","Sibling path conflicted across component boundary.");
+            var hard=Path.Combine(sibling,"hard.txt");
+            if(!CreateHardLink(hard,child,IntPtr.Zero)){ Console.WriteLine("SKIP hardlink fixture: link creation unavailable."); return Task.CompletedTask; }
+            Refuses<NotSupportedException>(()=>service.RequestResources(b,[new("file:"+hard,"write")],"hard"));
+            Refuses<NotSupportedException>(()=>service.RequestResources(c,[new("file:"+sibling,"write")],"hard-directory"));
+            service.ReleaseResources(a,dirHold.Id,1,"release-dir");
+            Check(service.ListAdmissions(b).Single(x=>x.Resources.Any(r=>r.Resource.EndsWith("CHILD.TXT",StringComparison.Ordinal))).State=="suspended","New hard link did not suspend pending file after committed release.");
+            Check(service.Snapshot().Entries.Single(e=>e.Id==b.Address).Holds.Count==1,"Suspended file projected a hold or lost unrelated bundle.");
+            return Task.CompletedTask;
+        });
+        await test("Kernel stale queued owner suspends on promotion",()=>{
+            var dir=Fresh(root,"admission-stale");ParticipantSession ownerSession,queuedSession;string held,waiting;
+            using(var service=new CoordinationService(dir)){
+                ownerSession=service.Register("owner");queuedSession=service.Register("queued");
+                var owner=service.Authenticate(ownerSession);var queued=service.Authenticate(queuedSession);
+                held=service.RequestResources(owner,[new("id:stale","write")],"held").Id;
+                waiting=service.RequestResources(queued,[new("id:stale","write")],"waiting").Id;
+            }
+            SetParticipantTicks(Path.Combine(dir,"coordination.sqlite"),queuedSession.Id,0);
+            using(var service=new CoordinationService(dir)){
+                var owner=service.Authenticate(ownerSession);
+                Refuses<UnauthorizedAccessException>(()=>service.Authenticate(queuedSession));
+                var before=service.Snapshot().Generation;
+                service.ReleaseResources(owner,held,1,"release");
+                var suspended=service.ReadAdmission(service.TrustedUser(),waiting);
+                Check(suspended.State=="suspended"&&suspended.Reason is not null&&service.Snapshot().Generation==before+1,"Stale owner was admitted or private suspension changed generation.");
+                Check(service.Snapshot().Entries.All(e=>!e.Holds.ContainsKey("id:stale")),"Suspended work projected a hold.");
+            }
+            return Task.CompletedTask;
+        });
+        await test("Kernel admission cancellation restart and concurrent writers",async()=>{
+            var dir=Fresh(root,"admission-restart");ParticipantSession stale;string held,queued;
+            using(var service=new CoordinationService(dir)){
+                var a=service.Authenticate(service.Register("a"));stale=service.Register("b");var b=service.Authenticate(stale);
+                held=service.RequestResources(a,[new("id:same","write")],"held").Id;
+                queued=service.RequestResources(b,[new("id:same","write")],"queued").Id;
+                var generation=service.Snapshot().Generation;
+                service.CancelAdmission(b,queued,1,"cancel");
+                Check(service.Snapshot().Generation==generation,"Pending cancel advanced projection.");
+                Refuses<InvalidOperationException>(()=>service.CancelAdmission(b,queued,1,"again"));
+                queued=service.RequestResources(b,[new("id:same","write")],"queued-2").Id;
+            }
+            using(var service=new CoordinationService(dir)){
+                var a=service.Authenticate(service.Register("a-new"));
+                // The original admitted owner is preserved; a different registration cannot release it.
+                Refuses<UnauthorizedAccessException>(()=>service.ReleaseResources(a,held,1,"forged"));
+                Check(service.Snapshot().Entries.Any(e=>e.Holds.ContainsKey("id:same")),"Restart lost admitted hold.");
+            }
+            using(var service=new CoordinationService(Fresh(root,"admission-race"))){
+                var a=service.Authenticate(service.Register("a"));var b=service.Authenticate(service.Register("b"));
+                var results=await Task.WhenAll(Task.Run(()=>service.RequestResources(a,[new("id:race","write")],"race-a")),Task.Run(()=>service.RequestResources(b,[new("id:race","write")],"race-b")));
+                Check(results.Count(r=>r.State=="admitted")==1&&results.Count(r=>r.State=="pending")==1,"Concurrent writers both admitted or both waited.");
+            }
+        });
+    }
+    private static void SetParticipantTicks(string path,string id,long ticks){
+        var rc=sqlite3_open_v2(path,out var db,2,IntPtr.Zero);if(rc!=0)throw new IOException("Test SQLite open failed.");
+        try{rc=sqlite3_exec(db,"UPDATE participants SET created_ticks="+ticks+" WHERE id='"+id+"'",IntPtr.Zero,IntPtr.Zero,out var error);if(rc!=0)throw new IOException("Test SQLite update failed: "+Marshal.PtrToStringUTF8(error));}
+        finally{sqlite3_close(db);}
     }
     private static void SetPragma(string path,string pragma){
         var rc=sqlite3_open_v2(path,out var db,2,IntPtr.Zero);if(rc!=0)throw new IOException("Test SQLite open failed.");
@@ -130,7 +249,9 @@ internal static class KernelChecks
     }
     [DllImport("winsqlite3.dll",CallingConvention=CallingConvention.Cdecl)]private static extern int sqlite3_open_v2([MarshalAs(UnmanagedType.LPUTF8Str)]string path,out IntPtr db,int flags,IntPtr vfs);
     [DllImport("winsqlite3.dll",CallingConvention=CallingConvention.Cdecl)]private static extern int sqlite3_exec(IntPtr db,[MarshalAs(UnmanagedType.LPUTF8Str)]string sql,IntPtr callback,IntPtr context,out IntPtr error);
-    [DllImport("winsqlite3.dll",CallingConvention=CallingConvention.Cdecl)]private static extern int sqlite3_close(IntPtr db);}
+    [DllImport("winsqlite3.dll",CallingConvention=CallingConvention.Cdecl)]private static extern int sqlite3_close(IntPtr db);
+    [DllImport("kernel32.dll",EntryPoint="CreateHardLinkW",CharSet=CharSet.Unicode,SetLastError=true)]private static extern bool CreateHardLink(string name,string existing,IntPtr reserved);
+    [DllImport("kernel32.dll",EntryPoint="GetShortPathNameW",CharSet=CharSet.Unicode,SetLastError=true)]private static extern uint GetShortPathName(string longPath,System.Text.StringBuilder shortPath,uint size);}
 
 
 

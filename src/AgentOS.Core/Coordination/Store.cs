@@ -61,9 +61,9 @@ internal sealed class CoordinationStore : IDisposable
                 if (Scalar("PRAGMA quick_check") != "ok")
                     throw new InvalidDataException("Coordination database integrity check failed; preserve its bytes.");
                 if (Scalar("PRAGMA application_id") != ApplicationId.ToString(System.Globalization.CultureInfo.InvariantCulture) ||
-                    Scalar("PRAGMA user_version") != "1")
-                    throw new InvalidDataException("Unsupported coordination database identity or schema; preserve its bytes.");
-                foreach (var table in new[] { "meta", "participants", "actions", "messages", "outbox", "evidence", "idempotency" })
+                    Scalar("PRAGMA user_version") != "2")
+                    throw new InvalidDataException("Unsupported coordination database identity or schema; preserve its bytes and select a fresh root. Schema 1 is not imported.");
+                foreach (var table in new[] { "meta", "participants", "actions", "messages", "outbox", "evidence", "idempotency", "admissions", "admission_resources" })
                     if (Scalar("SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?", table) != "1")
                         throw new InvalidDataException("Incomplete coordination schema; preserve its bytes.");
             }
@@ -94,13 +94,14 @@ internal sealed class CoordinationStore : IDisposable
         try
         {
             Exec($"PRAGMA application_id={ApplicationId}");
-            Exec("PRAGMA user_version=1");
+            Exec("PRAGMA user_version=2");
             Exec("CREATE TABLE meta(generation INTEGER NOT NULL CHECK(generation>=0), secret TEXT NOT NULL)");
             Run("INSERT INTO meta VALUES(0,?)", Convert.ToHexString(RandomNumberGenerator.GetBytes(32)));
             CoordinationIdentity.CreateSchema(this);
             CoordinationActions.CreateSchema(this);
             CoordinationMessaging.CreateSchema(this);
             CoordinationEvidence.CreateSchema(this);
+            CoordinationAdmission.CreateSchema(this);
             Exec("CREATE TABLE idempotency(actor TEXT NOT NULL, command TEXT NOT NULL, key TEXT NOT NULL, digest TEXT NOT NULL, result TEXT NOT NULL, PRIMARY KEY(actor,key))");
             Exec("COMMIT");
         }

@@ -34,7 +34,7 @@ internal sealed class CoordinationPresentation
         var generation = long.Parse(_store.Scalar("SELECT generation FROM meta")!,
             System.Globalization.CultureInfo.InvariantCulture);
         var entries = _store.Rows("SELECT id,seen_at FROM participants ORDER BY id")
-            .Select(row => new Entry(row[0]!, new Dictionary<string, string>(),
+            .Select(row => new Entry(row[0]!, CoordinationAdmission.ProjectHolds(_store, row[0]!),
                 DateTimeOffset.Parse(row[1]!, System.Globalization.CultureInfo.InvariantCulture))).ToArray();
         var messages = _store.Rows("SELECT id,sender,recipient,text,reply_to,created_at FROM messages ORDER BY created_at,id")
             .Select(row => new Message(row[0]!, row[1]!, row[2]!, row[3]!, row[4],
